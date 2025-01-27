@@ -118,13 +118,13 @@ def main():
  
 	# Load PaS model 
 	label_ckpt_dir = 'data/crossing_H12/label_vae_ckpt/label_weight_300.pth'
-	label_vae = Label_VAE(args).to(device)
+	label_vae = Label_VAE(algo_args).to(device)
 	label_vae.load_state_dict(torch.load(label_ckpt_dir))
 	pas_ckpt_dir = 'data/crossing_H12/sensor_vae_woEstLoss_ckpt/sensor_weight_300.pth'
-	sensor_vae = Sensor_VAE(args, config).to(device)
+	sensor_vae = Sensor_VAE(algo_args, config).to(device)
 	sensor_vae.load_state_dict(torch.load(pas_ckpt_dir))
  
-	mppi_module = MPPI_Planner(config, args, device)
+	mppi_module = MPPI_Planner(config, algo_args, device)
  
 	# pas_ckpt_dir = 'data/pasrl_CircleFOV30_seed10/checkpoints'
 	# load_path=os.path.join(pas_ckpt_dir, '38800.pt')
