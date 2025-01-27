@@ -1,0 +1,15 @@
+*.pyc 
+*__pycache__*
+build/
+env/
+data/
+crossing_H6/
+crossing_H12/
+mppi/sanitycheck/
+**egg-info/
+Python-RVO2/
+*_vis*
+*original*
+diffstack/
+grids/
+figures/
