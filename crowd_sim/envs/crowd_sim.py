@@ -214,23 +214,35 @@ class CrowdSim(gym.Env):
     # return a static human in env
     # position: (px, py) for fixed position, or None for random position
     def generate_static_obstacle(self, human_id):
-        # generate a human with radius = 0.3, v_pref = 1, visible = True, and policy = orca
-        human = Human(self.config, 'humans', 'orca')
+        if human_id < self.human_num-1:
+       
+            # generate a human with radius = 0.3, v_pref = 1, visible = True, and policy = orca
+            human = Human(self.config, 'humans', 'orca')
 
-        # coef of the line that connects robot's start and goal
-        coef = (self.robot.py-self.robot.gy) / (self.robot.px-self.robot.gx)
+            # # coef of the line that connects robot's start and goal
+            # coef = (self.robot.py-self.robot.gy) / (self.robot.px-self.robot.gx)
 
-        # perpendicular coef
-        coef_perp = -1 / coef
-        k = np.sqrt((human.radius*2)**2/(1 + coef_perp ** 2))
+            # # perpendicular coef
+            # coef_perp = -1 / coef
+            # k = np.sqrt((human.radius*2)**2/(1 + coef_perp ** 2))
 
-        # position humans on the perpendicular line with distance k from the middle point of robot's start and goal. First person in the middle, second person on the left, third person on the right, etc.
-        px = (self.robot.px + self.robot.gx) / 2 + (-1)**(human_id+1) * k * ((human_id+1) //2)
-        py = (self.robot.py + self.robot.gy) / 2 + (-1)**(human_id+1) * k * coef_perp * ((human_id+1) //2)
+            # # position humans on the perpendicular line with distance k from the middle point of robot's start and goal. First person in the middle, second person on the left, third person on the right, etc.
+            # px = (self.robot.px + self.robot.gx) / 2 + (-1)**(human_id+1) * k * ((human_id+1) //2)
+            # py = (self.robot.py + self.robot.gy) / 2 + (-1)**(human_id+1) * k * coef_perp * ((human_id+1) //2)
+            
+            # position humans next to each other to form a wall.
+            px = self.robot.px -2. + human.radius*2 * human_id
+            py = self.robot.py + 4.            
 
-        # make it a static obstacle
-        # px, py, gx, gy, vx, vy, theta
-        human.set(px, py, px, py, 0, 0, 0, v_pref=0)
+            # make it a static obstacle
+            # px, py, gx, gy, vx, vy, theta
+            human.set(px, py, px, py, 0, 0, 0, v_pref=0)
+        else:
+            # generate one human behind the wall.
+            human = Human(self.config, 'humans', 'orca')
+            px = self.robot.px +0.5
+            py = self.robot.py + 5.5
+            human.set(px, py, 0, 0, 0, 0, 0)
         return human
     
 
@@ -312,7 +324,7 @@ class CrowdSim(gym.Env):
                 for i, agent in enumerate([self.robot] + self.humans):
                     # keep human at least 3 meters away from robot
                     if self.robot.kinematics == 'unicycle':
-                        min_dist = self.circle_radius / 2 # Todo: if circle_radius <= 4, it will get stuck here
+                        min_dist = (human.radius + agent.radius) * 2 # self.circle_radius / 2 # Todo: if circle_radius <= 4, it will get stuck here
                     else:
                         min_dist = human.radius + agent.radius + self.discomfort_dist
                     if norm((px - agent.px, py - agent.py)) < min_dist or \
@@ -368,11 +380,12 @@ class CrowdSim(gym.Env):
         # if self.sim == "circle_crossing":                
         while True:
             # Make the goal closer to the center so that the robot encounters obstructed agents more often
-            px, py = np.random.uniform(-self.square_width/2., self.square_width/2., 2)
             if self.sim == "circle_crossing":
+                px, py = np.random.uniform(-self.square_width/2., self.square_width/2., 2)
                 gx, gy = 1.0, 1.0 
             elif self.sim == 'static_obstacles':
-                gx, gy = -px, -py
+                px, py = 2.0, -4.0
+                gx, gy = 0.0, -py
             if np.linalg.norm([px - gx, py - gy]) >= 4: #8:
                 break
         vx = np.random.uniform(-self.config.robot.v_pref, self.config.robot.v_pref)/2.
@@ -643,7 +656,7 @@ class CrowdSim(gym.Env):
             reaching_goal_temp = norm(np.array(self.robot.get_position()) - np.array(self.robot.get_goal_position())) < self.robot.radius + 0.2
             if reaching_goal_temp:
                 reward = 5.
-                self.update_robot_goal(self.robot.get_goal_position())
+                # self.update_robot_goal(self.robot.get_goal_position())
                 self.n_loop += 1
             if self.n_loop >= self.total_loop:
                 reaching_goal = True
@@ -694,7 +707,7 @@ class CrowdSim(gym.Env):
 
         # This code is for turtlebot experiment. Comment out for simulation
         # if the robot is near collision/arrival, it should be able to turn a large angle
-        if self.robot.kinematics == 'unicycle' and not self.collectingdata and self.config.robot.policy != 'pas_diffstack':
+        if self.robot.kinematics == 'unicycle' and not self.collectingdata and self.config.robot.policy != 'pas_mppi':
             # add a rotational penalty
             r_spin = -2 * action.r**2
 

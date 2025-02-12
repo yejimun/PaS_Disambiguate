@@ -280,9 +280,7 @@ class CrowdSimDict(CrowdSim):
         # (iv) change the setting to collecting data
         
         # ob['sensor_grid'] = np.array([self.disambig_reward_grid[-1]])
-        
         self.states.append([self.robot.get_full_state(), [human.get_full_state() for human in self.humans]])
-        
         return ob
 
 
@@ -413,7 +411,7 @@ class CrowdSimDict(CrowdSim):
 
         # get robot observation
         ob = self.generate_ob(reset=True)
-        if self.robot.kinematics == 'unicycle' and (self.config.robot.policy != 'pas_diffstack' or self.config.robot.policy == 'pas_mppi'):  # when 'pas_diffstack', action is returend as a part of the observation
+        if self.robot.kinematics == 'unicycle' and (self.config.robot.policy != 'pas_diffstack' or self.config.robot.policy != 'pas_mppi'):  # when 'pas_diffstack', action is returend as a part of the observation
             ob['vector'][3:5] =  np.array([0,0]) # TODO: needs to be updated to actual initial velocity
             
         # initialize current sensor grid and map_xy for disambiguation reward
@@ -693,7 +691,6 @@ class CrowdSimDict(CrowdSim):
                 self.robot.set_diffstack(r_px, r_py, r_theta, r_speed)
         else:
             self.robot.step(action)
-                    
             
         for i, human_action in enumerate(human_actions):
             self.humans[i].step(human_action)
@@ -719,7 +716,7 @@ class CrowdSimDict(CrowdSim):
             reward += np.any(disambig_c>0) * self.config.reward.disambig_factor  
         
 
-        if self.robot.kinematics == 'unicycle' and self.config.robot.policy != 'pas_diffstack':    
+        if self.robot.kinematics == 'unicycle' and self.config.robot.policy != 'pas_mppi':    
             ob['vector'][3:5] =  np.array(action)      # (2, N+1, )   
             
             
@@ -824,18 +821,18 @@ class CrowdSimDict(CrowdSim):
             plt.legend([robot, goal], ['Robot', 'Goal'], fontsize=16, loc='upper left')
             
             
-            # Add 120  degree line of field of view for the robot
-            FOV_angle = math.pi/3*2
-            x1 = robotX + self.robot_fov * np.cos(self.robot.theta + FOV_angle/2)
-            y1 = robotY + self.robot_fov * np.sin(self.robot.theta + FOV_angle/2)
-            x2 = robotX + self.robot_fov * np.cos(self.robot.theta - FOV_angle/2)
-            y2 = robotY + self.robot_fov * np.sin(self.robot.theta - FOV_angle/2)
-            FOVLine = mlines.Line2D([robotX, x1], [robotY, y1], linestyle='--')
-            FOVLine2 = mlines.Line2D([robotX, x2], [robotY, y2], linestyle='--')
-            ax.add_artist(FOVLine)
-            ax.add_artist(FOVLine2)
-            artists.append(FOVLine)
-            artists.append(FOVLine2)
+            # # Add 120  degree line of field of view for the robot
+            # FOV_angle = math.pi/3*2
+            # x1 = robotX + self.robot_fov * np.cos(self.robot.theta + FOV_angle/2)
+            # y1 = robotY + self.robot_fov * np.sin(self.robot.theta + FOV_angle/2)
+            # x2 = robotX + self.robot_fov * np.cos(self.robot.theta - FOV_angle/2)
+            # y2 = robotY + self.robot_fov * np.sin(self.robot.theta - FOV_angle/2)
+            # FOVLine = mlines.Line2D([robotX, x1], [robotY, y1], linestyle='--')
+            # FOVLine2 = mlines.Line2D([robotX, x2], [robotY, y2], linestyle='--')
+            # ax.add_artist(FOVLine)
+            # ax.add_artist(FOVLine2)
+            # artists.append(FOVLine)
+            # artists.append(FOVLine2)
             
             # compute orientation in each step and add arrow to show the direction
             radius = self.robot.radius
@@ -856,33 +853,33 @@ class CrowdSimDict(CrowdSim):
                 artists.append(arrow)
 
 
-            # draw FOV for the robot
-            # add robot FOV
-            if self.robot_fov < np.pi * 2:
-                FOVAng = self.robot_fov / 2
-                FOVLine1 = mlines.Line2D([0, 0], [0, 0], linestyle='--')
-                FOVLine2 = mlines.Line2D([0, 0], [0, 0], linestyle='--')
+            # # draw FOV for the robot
+            # # add robot FOV
+            # if self.robot_fov < np.pi * 2:
+            #     FOVAng = self.robot_fov / 2
+            #     FOVLine1 = mlines.Line2D([0, 0], [0, 0], linestyle='--')
+            #     FOVLine2 = mlines.Line2D([0, 0], [0, 0], linestyle='--')
 
 
-                startPointX = robotX
-                startPointY = robotY
-                endPointX = robotX + radius * np.cos(robot_theta)
-                endPointY = robotY + radius * np.sin(robot_theta)
+            #     startPointX = robotX
+            #     startPointY = robotY
+            #     endPointX = robotX + radius * np.cos(robot_theta)
+            #     endPointY = robotY + radius * np.sin(robot_theta)
 
-                # transform the vector back to world frame origin, apply rotation matrix, and get end point of FOVLine
-                # the start point of the FOVLine is the center of the robot
-                FOVEndPoint1 = calcFOVLineEndPoint(FOVAng, [endPointX - startPointX, endPointY - startPointY], 20. / self.robot.radius)
-                FOVLine1.set_xdata(np.array([startPointX, startPointX + FOVEndPoint1[0]]))
-                FOVLine1.set_ydata(np.array([startPointY, startPointY + FOVEndPoint1[1]]))
-                FOVEndPoint2 = calcFOVLineEndPoint(-FOVAng, [endPointX - startPointX, endPointY - startPointY], 20. / self.robot.radius)
-                FOVLine2.set_xdata(np.array([startPointX, startPointX + FOVEndPoint2[0]]))
-                FOVLine2.set_ydata(np.array([startPointY, startPointY + FOVEndPoint2[1]]))
+            #     # transform the vector back to world frame origin, apply rotation matrix, and get end point of FOVLine
+            #     # the start point of the FOVLine is the center of the robot
+            #     FOVEndPoint1 = calcFOVLineEndPoint(FOVAng, [endPointX - startPointX, endPointY - startPointY], 20. / self.robot.radius)
+            #     FOVLine1.set_xdata(np.array([startPointX, startPointX + FOVEndPoint1[0]]))
+            #     FOVLine1.set_ydata(np.array([startPointY, startPointY + FOVEndPoint1[1]]))
+            #     FOVEndPoint2 = calcFOVLineEndPoint(-FOVAng, [endPointX - startPointX, endPointY - startPointY], 20. / self.robot.radius)
+            #     FOVLine2.set_xdata(np.array([startPointX, startPointX + FOVEndPoint2[0]]))
+            #     FOVLine2.set_ydata(np.array([startPointY, startPointY + FOVEndPoint2[1]]))
 
-                ax.add_artist(FOVLine1)
-                ax.add_artist(FOVLine2)
-                artists.append(FOVLine1)
-                artists.append(FOVLine2)
-
+            #     ax.add_artist(FOVLine1)
+            #     ax.add_artist(FOVLine2)
+            #     artists.append(FOVLine1)
+            #     artists.append(FOVLine2)
+          
             if all_videoGrids == 99.:
                 pass
             else:
@@ -964,22 +961,41 @@ class CrowdSimDict(CrowdSim):
             ax.add_artist(robot)
             ax.add_artist(goal)
             
-            # Add 120  degree line of field of view for the robot
-            FOV_angle = math.pi/3*2
-            x1 = robot_positions[0][0] + self.robot_fov * np.cos(robot_thetas[0] + FOV_angle/2)
-            y1 = robot_positions[0][1] + self.robot_fov * np.sin(robot_thetas[0] + FOV_angle/2)
-            x2 = robot_positions[0][0] + self.robot_fov * np.cos(robot_thetas[0] - FOV_angle/2)
-            y2 = robot_positions[0][1] + self.robot_fov * np.sin(robot_thetas[0] - FOV_angle/2)
+            # # Add 120  degree line of field of view for the robot
+            # FOV_angle = math.pi/3*2
+            # x1 = robot_positions[0][0] + self.robot_fov * np.cos(robot_thetas[0] + FOV_angle/2)
+            # y1 = robot_positions[0][1] + self.robot_fov * np.sin(robot_thetas[0] + FOV_angle/2)
+            # x2 = robot_positions[0][0] + self.robot_fov * np.cos(robot_thetas[0] - FOV_angle/2)
+            # y2 = robot_positions[0][1] + self.robot_fov * np.sin(robot_thetas[0] - FOV_angle/2)
+            # FOVLine = mlines.Line2D([robot_positions[0][0], x1], [robot_positions[0][1], y1], linestyle='--')
+            # FOVLine2 = mlines.Line2D([robot_positions[0][0], x2], [robot_positions[0][1], y2], linestyle='--')
+            # ax.add_artist(FOVLine)
+            # ax.add_artist(FOVLine2)
+            
+            ## Add disambiguation area for the robot towards the goal
+            # # Obtain rays for the robot towards the goal direction with 120 degree FOV
+            heading = np.arctan2(self.robot.gy-robot_positions[0][1], self.robot.gx-robot_positions[0][0]) # (K,)
+            
+            # # Mask points from grid_xy
+            x1 = robot_positions[0][0] + 20 * np.cos(heading-self.config.robot.disambig_angle*np.pi/2.) # (K,)
+            y1 = robot_positions[0][1] + 20 * np.sin(heading-self.config.robot.disambig_angle*np.pi/2.) # (K,)
+            
+            x2 = robot_positions[0][0] + 20 * np.cos(heading+self.config.robot.disambig_angle*np.pi/2.) # (K,)
+            y2 = robot_positions[0][1] + 20 * np.sin(heading+self.config.robot.disambig_angle*np.pi/2.) # (K,)
+            
             FOVLine = mlines.Line2D([robot_positions[0][0], x1], [robot_positions[0][1], y1], linestyle='--')
             FOVLine2 = mlines.Line2D([robot_positions[0][0], x2], [robot_positions[0][1], y2], linestyle='--')
             ax.add_artist(FOVLine)
             ax.add_artist(FOVLine2)
+    
             
             if self.sim == 'static_obstacles':
-                goal2 = mlines.Line2D([-self.robot.gx], [-self.robot.gy], color='black', markerfacecolor=robot_color, marker='*', linestyle='None', markersize=15, label='Goal2')
-                ax.add_artist(goal2)
-                # ax.add_artist(FOV)
-                plt.legend([robot, goal, goal2], ['Robot', 'Goal', 'Goal2'], fontsize=16, loc='upper left')
+                # goal2 = mlines.Line2D([-self.robot.gx], [-self.robot.gy], color='black', markerfacecolor=robot_color, marker='*', linestyle='None', markersize=15, label='Goal2')
+                # ax.add_artist(goal2)
+                # # ax.add_artist(FOV)
+                # plt.legend([robot, goal, goal2], ['Robot', 'Goal', 'Goal2'], fontsize=16, loc='upper left')
+                plt.legend([robot, goal], ['Robot', 'Goal'], fontsize=16, loc='upper left')
+                print('robot goal', self.robot.gx, self.robot.gy)
             else:
                 plt.legend([robot, goal], ['Robot', 'Goal'], fontsize=16, loc='upper left')
 
@@ -1007,8 +1023,9 @@ class CrowdSimDict(CrowdSim):
             # compute orientation in each step and use arrow to show the direction
             radius = self.robot.radius
             if self.robot.kinematics == 'unicycle':
-                orientation = [((state[0].px, state[0].py), (state[0].px + radius * np.cos(state[0].theta),
-                                                             state[0].py + radius * np.sin(state[0].theta))) for state
+                # addping np.pi because we consider the robot's orientation as the angle between the x-axis and the direction of the robot
+                orientation = [((state[0].px, state[0].py), (state[0].px + radius * np.cos(np.arctan2(state[0].vy, state[0].vx)),
+                                                             state[0].py + radius * np.sin(np.arctan2(state[0].vy, state[0].vx)))) for state
                                in self.states]
                 orientations = [orientation]
             else:
@@ -1062,10 +1079,22 @@ class CrowdSimDict(CrowdSim):
                         
                 robot.center = robot_positions[frame_num]
                 
-                FOVLine.set_xdata([robot_positions[frame_num][0], robot_positions[frame_num][0] + self.robot_fov * np.cos(robot_thetas[frame_num] + FOV_angle/2)])
-                FOVLine.set_ydata([robot_positions[frame_num][1], robot_positions[frame_num][1] + self.robot_fov * np.sin(robot_thetas[frame_num] + FOV_angle/2)])
-                FOVLine2.set_xdata([robot_positions[frame_num][0], robot_positions[frame_num][0] + self.robot_fov * np.cos(robot_thetas[frame_num] - FOV_angle/2)])
-                FOVLine2.set_ydata([robot_positions[frame_num][1], robot_positions[frame_num][1] + self.robot_fov * np.sin(robot_thetas[frame_num] - FOV_angle/2)])
+                ## Add disambiguation area for the robot towards the goal
+                # # Obtain rays for the robot towards the goal direction with 120 degree FOV
+                heading = np.arctan2(self.robot.gy-robot_positions[frame_num][1], self.robot.gx-robot_positions[frame_num][0]) # (K,)
+                
+                # # Mask points from grid_xy
+                x1 = robot_positions[frame_num][0] + 20 * np.cos(heading-self.config.robot.disambig_angle*np.pi/2.) # (K,)
+                y1 = robot_positions[frame_num][1] + 20 * np.sin(heading-self.config.robot.disambig_angle*np.pi/2.) # (K,)
+                
+                x2 = robot_positions[frame_num][0] + 20 * np.cos(heading+self.config.robot.disambig_angle*np.pi/2.) # (K,)
+                y2 = robot_positions[frame_num][1] + 20 * np.sin(heading+self.config.robot.disambig_angle*np.pi/2.) # (K,)
+                
+                
+                FOVLine.set_xdata([robot_positions[frame_num][0], x1])
+                FOVLine.set_ydata([robot_positions[frame_num][1], y1])
+                FOVLine2.set_xdata([robot_positions[frame_num][0], x2])
+                FOVLine2.set_ydata([robot_positions[frame_num][1], y2])
                 
                 if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
                     robot_trajs = self.planned_traj[frame_num][:,:2]

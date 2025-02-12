@@ -100,6 +100,9 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                 # decoded[0,0,80:90,80:90] = 1.0
                 
                 action, disambig_R_map = mppi_module.plan(obs, decoded, config)
+                # Use the observation grid for disambiguation. Set only the unknown area to be 1.
+                # obs_unknown_mask = torch.where(obs['grid'][:,-1]==0.5, torch.tensor(1.0), torch.tensor(0.0))
+                # action, disambig_R_map = mppi_module.plan(obs, obs_unknown_mask, config)
                 # else: # if robot's policy is ORCA 
                 #     action = torch.Tensor([-99., -99.])
 
@@ -110,7 +113,9 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
             if visualize: # and (k==59 or k==85):
                 # all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
                 decoded_only_unknown = torch.where(obs['grid'][:,-1]==0.5, decoded[:,0], torch.tensor(0.0))
+                # all_videoGrids.append(decoded_only_unknown.cpu().numpy())
                 all_videoGrids.append(disambig_R_map.cpu().numpy()[[0]])
+                # all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
                 # if config.robot.policy == 'pas_rnn':
                 #     # if config.pas.encoder_type == 'vae' and config.pas.gridsensor == 'sensor':
                 #     #     all_videoGrids.append(decoded.squeeze(0).squeeze(1).cpu().numpy())
@@ -121,6 +126,7 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                 #     all_videoGrids = torch.Tensor([99.])
                 
                          
+
             obs, rew, done, infos = eval_envs.step(action)
             # pdb.set_trace()
             # print(time.time()-start_time) # takes 1.8~1.9s for each step with disambiguation
@@ -174,6 +180,7 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                 # all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
                 decoded_only_unknown = torch.where(obs['grid'][:,-1]==0.5, decoded[:,0], torch.tensor(0.0))
                 all_videoGrids.append(disambig_R_map.cpu().numpy()[[0]])
+                # all_videoGrids.append(decoded_only_unknown.cpu().numpy())
                 
                 video_dir = model_dir+"/"+phase+"_render/"
                 if not os.path.exists(video_dir):

@@ -39,7 +39,7 @@ def dict_update(humans, robot, config, vis_ids):
     return human_pos, human_id, robot_pos
 
 
-def disambig_mask(grid_xy, robot_pos, goal, decoded_in_unknown, grid_res):
+def disambig_mask(grid_xy, robot_pos, goal, decoded_in_unknown, grid_res, disambig_angle):
     """
     Mask the grid to disambiguate the robot's path towards the goal. 
     The mask is a 120 degree cone towards the goal.
@@ -73,14 +73,13 @@ def disambig_mask(grid_xy, robot_pos, goal, decoded_in_unknown, grid_res):
     
     # # Obtain rays for the robot towards the goal direction with 120 degree FOV
     heading = torch.atan2(goal[1]-robot_pos[:,1], goal[0]-robot_pos[:,0]) # (K,)
-    FOV_angle = math.pi/3*2 #torch.asin(torch.clip(human_radius/torch.sqrt((center[:,1]-r_pos[:,1])**2 + (center[:,0]-r_pos[:,0])**2), -1., 1.)) # (K,)
     
     # # Mask points from grid_xy
-    x1 = robot_pos[:,0] + 20 * torch.cos(heading-FOV_angle/2.) # (K,)
-    y1 = robot_pos[:,1] + 20 * torch.sin(heading-FOV_angle/2.) # (K,)
+    x1 = robot_pos[:,0] + 20 * torch.cos(heading-disambig_angle/2.) # (K,)
+    y1 = robot_pos[:,1] + 20 * torch.sin(heading-disambig_angle/2.) # (K,)
     
-    x2 = robot_pos[:,0] + 20 * torch.cos(heading+FOV_angle/2.) # (K,)
-    y2 = robot_pos[:,1] + 20 * torch.sin(heading+FOV_angle/2.) # (K,)
+    x2 = robot_pos[:,0] + 20 * torch.cos(heading+disambig_angle/2.) # (K,)
+    y2 = robot_pos[:,1] + 20 * torch.sin(heading+disambig_angle/2.) # (K,)
     
     polygon = torch.stack([torch.stack([x1, y1], dim=1), torch.stack([x2, y2], dim=1), robot_pos], dim=1) # (K, 2, 2)
     grid_x = grid_xy[[0]].repeat(K, 1, 1).view(K, -1)
@@ -123,10 +122,12 @@ def compute_disambig_cost(robot_pos, grid_xy, sensor_grid, next_sensor_grid, dec
     grid_res = config.pas.grid_res
     grid_shape = [config.pas.grid_width, config.pas.grid_height] 
     disambig_method = config.reward.disambig_method
+    disambig_angle = config.robot.disambig_angle*torch.pi
     
-    disambig_weight_map = disambig_mask(grid_xy,robot_pos, goal, decoded_in_unknown, grid_res)
+    disambig_weight_map = disambig_mask(grid_xy,robot_pos, goal, decoded_in_unknown, grid_res, disambig_angle)
 
     # Calculate the uncertainty reward
+    ## We want to compute uncertainty in the unobserved area for both the current and next sensor grid.
     ## Obtain the unobserved area in both current and next sensor grid and set them to 0.5. Otherwise, 0 for both observed free and occupied cells.
     integrated_sensor = torch.zeros(sensor_grid.shape, device=sensor_grid.device).to(decoded_in_unknown.dtype)
     integrated_sensor[torch.logical_and(sensor_grid==0.5, next_sensor_grid==0.5)] = 0.5
@@ -383,6 +384,77 @@ def global_grid(origin,endpoint,res):
 
 # TODO: There should be a better way to do this in Pytorch
 # TODO: indice matching should be done in a batched manner
+# def transfer_grid_data(curr_xy, curr_grids, next_xy, next_grids, distance_threshold=0.1, batch_chunk_size=1):
+#     """
+#     Transfers data from curr_grids to next_grids based on coordinate mapping
+#     from curr_xy (ego grid) to next_xy (map grid) only if the coordinates are within
+#     a specified distance threshold.
+    
+    
+#     Arguments:
+#     curr_xy = [[B,H,W], [B,H,W]]   
+#     curr_grids = [B,H,W] 
+#     next_xy = [[H,W], [H,W]]
+#     next_grids = [H,W]
+#     distance_threshold -- A float specifying the maximum distance for considering two points a match.
+
+#     Returns:
+#     Updated grids with the transferred data from next_grids.
+#     """
+#     B, H, W = curr_grids.shape
+    
+#     # Initialize result tensor for updated pred_maps
+#     updated_grids = torch.ones_like(curr_grids).cuda()*0.5
+    
+#     next_xy_stacked = next_xy.permute(1,2, 0).to(curr_grids.dtype)  # (H, W, 2)
+#     curr_xy_stacked = torch.stack(curr_xy).permute(1,2,3,0).to(curr_grids.dtype)  # (B, H, W, 2)
+
+#     # # Compute pairwise distances between next_xy and curr_xy
+#     # # (H*W, B, 2)-(H*W, 1, 2) = (H*W, B, 1)
+    
+#     # dists = torch.cdist(curr_xy_stacked.view(B, -1,2).permute(1,0,2),next_xy_stacked.view(-1, 2) .unsqueeze(1), p=2)  # (H*W, B, 1)
+#     next_xy_flat = next_xy_stacked.view(-1, 2)  # (H*W, 2)
+#     kdtree = cKDTree(next_xy_flat.cpu().numpy())
+        
+#     # Process the batches in chunks to avoid memory overflow
+#     for start in range(0, B, batch_chunk_size):
+#         end = min(start + batch_chunk_size, B)
+
+#         # Extract the chunk of batches
+#         curr_grids_chunk = curr_grids[start:end]  # Shape: (batch_chunk_size, H_map, W_map)
+#         curr_xy_chunk = curr_xy_stacked[start:end]  # Shape: (batch_chunk_size, H_map, W_map, 2)
+#         curr_xy_chunk_flat = curr_xy_chunk.view(end-start, -1, 2)  # (batch_chunk_size, H_map*W_map, 2)
+
+#         # Flatten the grid coordinates for efficient index mapping
+#         curr_xy_flat = curr_xy_chunk.view(end-start, -1, 2)  # (batch_chunk_size, H_map*W_map, 2)
+#         # next_grids_flat = next_grids.repeat(end-start, 1, 1).view(-1)  # Flatten next grid data to (H*W)
+                            
+#         ## Memory issue;;
+#         # Compute pairwise distances between next_xy and curr_xy
+#         #(B, H*W, 1, 2)-(1,1, H*W, 2) = (B, H*W, H*W, 2)
+#         # dists = (curr_xy_flat.unsqueeze(2) - next_xy_flat.unsqueeze(0).unsqueeze(0)).norm(dim=-1)  # (batch_chunk_size, H*W, H*W)
+#         # ( B, H*W, 2) - (1, H*W, 2)
+#         # dists = torch.cdist(curr_xy_chunk_flat.unsqueeze(2), next_xy_flat.unsqueeze(0).unsqueeze(0).repeat(len(curr_xy_chunk_flat), 1, 1,1), p=2).view(batch_chunk_size, H*W, -1)  # (batch_chunk_size, H_map*W_map, H*W)
+#         # # Find the closest match in curr_grids for each point in curr_grids
+#         # min_dists, min_dist_indices = dists.min(dim=-1)  # (batch_chunk_size, H*W)
+        
+#         distances, indices = kdtree.query(curr_xy_chunk_flat.cpu().numpy()[0], distance_upper_bound=distance_threshold)  # (batch_chunk_size, H*W)
+#         mask = distances <= distance_threshold 
+#         mask = torch.from_numpy(mask).cuda()
+#         indices = torch.from_numpy(indices).cuda()
+
+#         # Using the mask, transfer the values in parallel
+#         curr_grids_flat = curr_grids_chunk.view(end-start, -1) # Flatten curr_grids to (batch_chunk_size, H_map*W_map)
+
+#         next_indices = indices[mask]
+#         curr_indices = torch.arange(H*W).to(indices)[mask]
+        
+#         # updated_grids[start:end].view(end-start, -1)[next_indices.unsqueeze(0)] = curr_grids_flat[curr_indices.unsqueeze(0)]
+#         updated_grids[start:end].view(-1)[next_indices] = curr_grids_flat.view(-1)[curr_indices]
+
+#     return updated_grids
+
+### Using keops: https://github.com/getkeops/keops/tree/main
 def transfer_grid_data(curr_xy, curr_grids, next_xy, next_grids, distance_threshold=0.1, batch_chunk_size=1):
     """
     Transfers data from curr_grids to next_grids based on coordinate mapping
@@ -427,15 +499,28 @@ def transfer_grid_data(curr_xy, curr_grids, next_xy, next_grids, distance_thresh
         # Flatten the grid coordinates for efficient index mapping
         curr_xy_flat = curr_xy_chunk.view(end-start, -1, 2)  # (batch_chunk_size, H_map*W_map, 2)
         # next_grids_flat = next_grids.repeat(end-start, 1, 1).view(-1)  # Flatten next grid data to (H*W)
+        
+        # from pykeops.torch import LazyTensor
+        # curr_xy_chunk_flat = LazyTensor(curr_xy_chunk_flat.unsqueeze(2))  # (batch_chunk_size, H_map*W_map, 1, 2)
+        # next_xy_flat = LazyTensor(next_xy_flat.unsqueeze(0).unsqueeze(0))  # (1, 1, H*W, 2)
+        # pdb.set_trace()
                             
-        ## Memory issue;;
-        # Compute pairwise distances between next_xy and curr_xy
-        #(B, H*W, 1, 2)-(1,1, H*W, 2) = (B, H*W, H*W, 2)
+        # ## Memory issue;;
+        # # Compute pairwise distances between next_xy and curr_xy
+        # #(B, H*W, 1, 2)-(1,1, H*W, 2) = (B, H*W, H*W, 2)
         # dists = (curr_xy_flat.unsqueeze(2) - next_xy_flat.unsqueeze(0).unsqueeze(0)).norm(dim=-1)  # (batch_chunk_size, H*W, H*W)
-        # ( B, H*W, 2) - (1, H*W, 2)
+        # # ( B, H*W, 2) - (1, H*W, 2)
         # dists = torch.cdist(curr_xy_chunk_flat.unsqueeze(2), next_xy_flat.unsqueeze(0).unsqueeze(0).repeat(len(curr_xy_chunk_flat), 1, 1,1), p=2).view(batch_chunk_size, H*W, -1)  # (batch_chunk_size, H_map*W_map, H*W)
         # # Find the closest match in curr_grids for each point in curr_grids
         # min_dists, min_dist_indices = dists.min(dim=-1)  # (batch_chunk_size, H*W)
+        # mask = min_dists <= distance_threshold
+        
+        # # Using the mask, transfer the values in parallel
+        # curr_grids_flat = curr_grids_chunk.view(end-start, -1) # Flatten curr_grids to (batch_chunk_size, H_map*W_map)
+        
+        # next_indices = min_dist_indices[mask]
+        # curr_indices = torch.arange(H*W).to(min_dist_indices)[mask]
+        
         
         distances, indices = kdtree.query(curr_xy_chunk_flat.cpu().numpy()[0], distance_upper_bound=distance_threshold)  # (batch_chunk_size, H*W)
         mask = distances <= distance_threshold 
@@ -452,6 +537,7 @@ def transfer_grid_data(curr_xy, curr_grids, next_xy, next_grids, distance_thresh
         updated_grids[start:end].view(-1)[next_indices] = curr_grids_flat.view(-1)[curr_indices]
 
     return updated_grids
+
 
 
 

@@ -3,8 +3,10 @@
 import os
 import logging
 import time
+import typing
 import torch
 from torch.distributions.multivariate_normal import MultivariateNormal
+from functorch import vmap
 from matplotlib import pyplot as plt
 from arm_pytorch_utilities import handle_batch_input
 from mppi.utils import * # compute_disambig_cost
@@ -17,63 +19,42 @@ logger = logging.getLogger(__name__)
 def _ensure_non_zero(cost, beta, factor):
     return torch.exp(-factor * (cost - beta))
 
-# TODOV: TEST THE GOAL REACHING FIRST (Done V)
-# TODOV: TEST THE COLLISION COST (Done V)
-# TODOV: TEST THE DISCOMFORT COST (Done V) 
-# TODOX: TEST Discrete actions (Optional)
-
-# 9/19
-# TODO: Check the action samples
-# TODOV: Consider the timestep for the ob and weight more on the near future 
-# TODOV: Make the MPPI cost use observation grid
-# TODO: Make the MPPI differentiable using the cost and the dynamics and class_hcost_loss from diffstack
-# TODOV: Parallelize the compute_disambig_cost and generate_label_grid/sensor_grid.
-# TODO: consider turning on things like 'sampe_null_action' and 'noise_abs_cost' in MPPI
-
-# 9/20
-# TODOV: Evaluate THE DISAMBIGUATING COST 
-# TODO: (optional) warm up the U_init to be the nomial trajectory between the current state and the final state.
-
-# 9/24
-# TODOV: Load the Pas inference module and test disambiguating cost
-# TODOV: need pas_inf_grid's x_local and y_local to find where the estimation is located in the rolled grid. 
-# Also, uncomment "disambig_reward_map += pas_inf_grid.squeeze(0)"
-
-# TODOV: Make the visualizer plot the grids in whole map
-# TODO: Modify Transfer_to_EgoGrid to work in batch
-# TODOV: update this x,y conditions to be 120 degree towards the goal.
-
-# 10/16
-# TODOV: Make the kernel = 0 in disambig mask and test robot behavior
-
-
-# 11/1
-# TODOV: Visualize disambig_reward_map  &  integrated_sensor if both works fine.
-# TODO: Clip the disambig_c to be positive
-# TODOV: Add disambig_weight_map
-# TODO: Check if the decoded is correct. Currently, it is getting 0. or 1. values.
-
-
-# 11/2
-# TODO: disambig_W_map towards the goal vs robot heading
-# TODOV: collect data & train pas_inf_grid to be more accurate
-
-
-# 11/8
-# TODOV: Do not use the ground truth human states for "currently" occluded humans when computing collision or discomfort cost.
-# TODOV: make the disambig_c smaller than discomfort_c
-# TODOV: make the disambig_c 0 if the discomfort_c or collision is high
-# TODO: debug why the robot's future trajectories are so close. 
-
-
-# 11/23
-# TODOV: check y_local in generateLabelGrid, and decide the global_grid flipud(grid_y)
-# TODOV: add null action to the last action and visualize the trajectory.
-# TDOO: SMPPI, KMPPI test
+# TODO: visualize the next states from sampled actions and debug the collision cases.
 # TODO: debug why the robot's future trajectories are so close. 
 # TODO: improve adaptive sampling to be more effective.
-# TODO: improve transfer_to_ego_grid to be more efficient.
+# TODO: improve transfer_to_ego_grid to be more efficient. Maybe try using https://github.com/getkeops/keops/tree/main.
 
+
+# Set random seed for reproducibility
+seed = 0
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
+# If using other libraries for randomness
+import random
+import numpy as np
+random.seed(seed)
+np.random.seed(seed)
+
+
+class SpecificActionSampler:
+    def __init__(self):
+        self.start_idx = 0
+        self.end_idx = 0
+        self.slice = slice(0, 0)
+
+    def sample_trajectories(self, state, info):
+        raise NotImplementedError
+
+    def specific_dynamics(self, next_state, state, action, t):
+        """Handle dynamics in a specific way for the specific action sampler; defaults to using default dynamics"""
+        return next_state
+
+    def register_sample_start_end(self, start_idx, end_idx):
+        self.start_idx = start_idx
+        self.end_idx = end_idx
+        self.slice = slice(start_idx, end_idx)
+        
 class MPPI():
     """
     Model Predictive Path Integral control
@@ -84,7 +65,7 @@ class MPPI():
     based off of https://github.com/ferreirafabio/mppi_pendulum
     """
 
-    def __init__(self, dynamics, running_cost, nx, noise_sigma, num_samples=100, horizon=30, device="cpu",
+    def __init__(self, dynamics, kinematics, running_cost, nx, noise_sigma, num_samples=100, horizon=30, device="cpu",
                  terminal_state_cost=None,
                  lambda_=1.,
                  noise_mu=None,
@@ -99,6 +80,7 @@ class MPPI():
                  rollout_var_cost=0,
                  rollout_var_discount=0.95,
                  sample_null_action=False,
+                 specific_action_sampler: typing.Optional[SpecificActionSampler] = None,
                  noise_abs_cost=False):
         """
         :param dynamics: function(state, action) -> next_state (K x nx) taking in batch state (K x nx) and action (K x nu)
@@ -171,17 +153,21 @@ class MPPI():
         self.u_init = u_init.to(self.d)
 
         if self.U is None:
-            # self.U = self.noise_dist.sample((self.T,))
-            self.U = self.noise_dist.sample((1,)).repeat(1, self.T,1)
-            self.noise = self.noise_dist.sample((self.K,1)).repeat(1, self.T, 1)
+            self.U = self.noise_dist.sample((self.K, self.T)).to(self.d) #torch.zeros((self.T,self.nu)).to(self.d)#self.noise_dist.sample((self.T,))
+            # self.noise = self.noise_dist.sample((self.K, self.T)).to(self.d)
+            # self.noise = self.noise_dist.sample((self.K,1)).repeat(1, self.T, 1)
 
         self.step_dependency = step_dependent_dynamics # not used
         self.F = dynamics
+        self.kinematics = kinematics
         self.running_cost = running_cost
         self.terminal_state_cost = terminal_state_cost
         self.sample_null_action = sample_null_action
+        self.specific_action_sampler = specific_action_sampler
         self.noise_abs_cost = noise_abs_cost
         self.state = None
+        self.info = None
+
 
         # handling dynamics models that output a distribution (take multiple trajectory samples)
         self.M = rollout_samples
@@ -205,8 +191,8 @@ class MPPI():
         return self.F(state, u) 
 
     # @handle_batch_input(n=2)
-    def _running_cost(self, state, ob, decoded, u, t):
-        return self.running_cost(state, ob, decoded, u, t)# if self.step_dependency else self.running_cost(state, u)
+    def _running_cost(self, state, ob, next_state, decoded, t):
+        return self.running_cost(state, ob, next_state, decoded, t)# if self.step_dependency else self.running_cost(state, u)
 
     def shift_nominal_trajectory(self):
         """
@@ -216,17 +202,24 @@ class MPPI():
         self.U = torch.roll(self.U, -1, dims=0)
         self.U[-1] = self.u_init
 
-    def command(self, state, ob, decoded, shift_nominal_trajectory=False):
+    def command(self, state, ob, decoded, shift_nominal_trajectory=False, info=None):
         """
         :param state: (nx) or (K x nx) current state, or samples of states (for propagating a distribution of states)
         :param shift_nominal_trajectory: Whether to roll the nominal trajectory forward one step. This should be True
         if the command is to be executed. If the nominal trajectory is to be refined then it should be False.
         :returns action: (nu) best action
         """
+        self.info = info
         if shift_nominal_trajectory:
             self.shift_nominal_trajectory()
         return self._command(state, ob, decoded)
     
+    def _compute_weighting(self, cost_total):
+        beta = torch.min(cost_total)
+        self.cost_total_non_zero = _ensure_non_zero(cost_total, beta, 1 / self.lambda_)
+        eta = torch.sum(self.cost_total_non_zero)
+        self.omega = (1. / eta) * self.cost_total_non_zero
+        return self.omega
     def _command(self, state, ob, decoded):
         if not torch.is_tensor(state):
             state = torch.tensor(state)
@@ -235,31 +228,26 @@ class MPPI():
         self.decoded = decoded.to(dtype=self.dtype, device=self.d)
         cost_total = self._compute_total_cost_batch()
         
-        # # TODO: check if this is the correct way to get the best action
-        # beta = torch.min(cost_total)
-        # self.cost_total_non_zero = _ensure_non_zero(cost_total, beta, 1 / self.lambda_)
-        # eta = torch.sum(self.cost_total_non_zero)
-        # self.omega = (1. / eta) * self.cost_total_non_zero
-        # perturbations = []
-        # for t in range(self.T):
-        #     perturbations.append(torch.sum(self.omega.view(-1, 1) * self.noise[:, t], dim=0))
-        # perturbations = torch.stack(perturbations)
-        # self.U = self.U + perturbations
+        # self._compute_weighting(cost_total)
+        # perturbations = torch.sum(self.omega.view(-1, 1, 1) * self.noise, dim=0)
+
+        # self.U = self.U  + perturbations
         # action = self.U[:self.u_per_command]
-        # # # reduce dimensionality if we only need the first command
-        # # if self.u_per_command == 1:
-        # #     action = action[0]
+        # # reduce dimensionality if we only need the first command
+        # if self.u_per_command == 1:
+        #     action = action[0]
         
-        # if cost_total[torch.argmin(cost_total)]>0:
-        #     print(cost_total[torch.argmin(cost_total)])
-        #     pdb.set_trace()
         action = self.perturbed_action[torch.argmin(cost_total)]
             
         propagated_states = []
         ## Rollouts with the final action
         for a in range(self.u_per_command):
-            state = self._dynamics(state[:2], action[a])
-            propagated_states.append(state)
+            if self.kinematics == "holonomic":
+                state = self._dynamics(state[:2], action[a])
+                propagated_states.append(state)
+            elif self.kinematics == "unicycle":
+                state = self._dynamics(state[:3], action[a])
+                propagated_states.append(state[:2])
             
         propagated_states = torch.stack(propagated_states)
         return propagated_states, action
@@ -287,30 +275,27 @@ class MPPI():
         cost_samples = cost_total.repeat(self.M, 1)
         cost_var = torch.zeros_like(cost_total)
 
-        # allow propagation of a sample of states (ex. to carry a distribution), or to start with a single state
-        # if self.state.shape == (K, self.nx):
-        #     state = self.state
-        # else:
         state = self.state.view(1, -1).repeat(K, 1)
 
         # rollout action trajectory M times to estimate expected cost
         # (batch, K, 2) (1, 100, 2)
-        state = state.repeat(self.M, 1, 1)[:, :, :2] # repeated current state # TODO: not using self.M
+        if self.kinematics == "holonomic":
+            state = state.repeat(self.M, 1, 1)[:, :, :2] # repeated current state # TODO: not using self.M
+        elif self.kinematics == "unicycle":
+            state = state.repeat(self.M, 1, 1)[:, :, :3] 
         
         
         # (batch, K, pred_horizon, human_num, 7) # repeated obs with pred_horizon
         ob = self.ob.unsqueeze(0).unsqueeze(0).repeat(self.M, K, 1, 1, 1) # vector obs
-        # ob = self.ob.unsqueeze(0).repeat(self.M, K, 1, 1) # grid obs  (1, 100, 100, 100) # (batch, K, H, W)
-        
-        # decoded = self.decoded.repeat(self.M, K, 1, 1) # vector obs
                 
         states = []
         actions = []
         for t in range(T):
-            u = self.u_scale * perturbed_actions[:, t].repeat(self.M, 1, 1)
-            # state = self._dynamics(state, u)
-            c = self._running_cost(state, ob, self.decoded, u, t) 
-            state = self._dynamics(state, u)
+            u = self.u_scale * perturbed_actions[:, t]#.repeat(self.M, 1, 1)
+            next_state = self._dynamics(state, u) # (1,50,2)
+
+            c = self._running_cost(state, ob, next_state, self.decoded, t) 
+            state = next_state
             cost_samples = cost_samples + c / (t+1)
             if self.M > 1:
                 cost_var += c.var(dim=0) * (self.rollout_var_discount ** t)
@@ -331,28 +316,53 @@ class MPPI():
         cost_total = cost_total + cost_samples.mean(dim=0)
         cost_total = cost_total + cost_var * self.rollout_var_cost
         return cost_total, states, actions
-
-    def _compute_total_cost_batch(self):
+    
+    def _compute_perturbed_action_and_noise(self):
         # parallelize sampling across trajectories
         # resample noise each time we take an action
-        # TODO: Add batch_size
-        # batch_size = self.state.shape[0]
-        # noise = self.noise_dist.rsample((self.K, self.T))
+        noise = self.noise_dist.rsample((self.K, self.T))
         # broadcast own control to noise over samples; now it's K x T x nu
-        perturbed_action = self.U + self.noise
+        perturbed_action = self.U + noise
+        perturbed_action = self._sample_specific_actions(perturbed_action)
+        # naively bound control
+        self.perturbed_action = self._bound_action(perturbed_action)
+        # bounded noise after bounding (some got cut off, so we don't penalize that in action cost)
+        self.noise = self.perturbed_action - self.U
+        
+    def _sample_specific_actions(self, perturbed_action):
+        # specific sampling of actions (encoding trajectory prior and domain knowledge to create biases)
+        i = 0
+        if self.sample_null_action:
+            perturbed_action[i] = 0
+            i += 1
+        if self.specific_action_sampler is not None:
+            actions = self.specific_action_sampler.sample_trajectories(self.state, self.info)
+            # check how long it is
+            actions = actions.reshape(-1, self.T, self.nu)
+            perturbed_action[i:i + actions.shape[0]] = actions
+            self.specific_action_sampler.register_sample_start_end(i, i + actions.shape[0])
+            i += actions.shape[0]
+        return perturbed_action
+    
+    def _sample_specific_dynamics(self, next_state, state, u, t):
+        if self.specific_action_sampler is not None:
+            next_state = self.specific_action_sampler.specific_dynamics(next_state, state, u, t)
+        return next_state
+
+    def _compute_total_cost_batch(self):
+        perturbed_action = self.U #+ self.noise
         if self.sample_null_action:
             perturbed_action[self.K - 1] = 0
         # naively bound control
         self.perturbed_action = self._bound_action(perturbed_action)
-        # bounded noise after bounding (some got cut off, so we don't penalize that in action cost)
-        # self.noise = self.perturbed_action - self.U
-        if self.noise_abs_cost:
-            action_cost = self.lambda_ * torch.abs(self.noise) @ self.noise_sigma_inv
-            # NOTE: The original paper does self.lambda_ * torch.abs(self.noise) @ self.noise_sigma_inv, but this biases
-            # the actions with low noise if all states have the same cost. With abs(noise) we prefer actions close to the
-            # nomial trajectory.
-        else:
-            action_cost = self.lambda_ * self.noise @ self.noise_sigma_inv  # Like original paper
+        # self._compute_perturbed_action_and_noise()
+        # if self.noise_abs_cost:
+        #     action_cost = self.lambda_ * torch.abs(self.noise) @ self.noise_sigma_inv
+        #     # NOTE: The original paper does self.lambda_ * torch.abs(self.noise) @ self.noise_sigma_inv, but this biases
+        #     # the actions with low noise if all states have the same cost. With abs(noise) we prefer actions close to the
+        #     # nomial trajectory.
+        # else:
+        #     action_cost = self.lambda_ * self.noise @ self.noise_sigma_inv  # Like original paper
 
         rollout_cost, self.states, actions = self._compute_rollout_costs(self.perturbed_action)
         self.actions = actions / self.u_scale
@@ -364,21 +374,30 @@ class MPPI():
 
     # TODO: might need to update this bound to be differentiable later
     def _bound_action(self, action):
+        bounded_action = action.clone()
         if self.u_max is not None:
             for t in range(self.T):
                 # TODO: does action needs to be flattened? Then, slice_control can be brought back.
-                u = action[:, t] # self._slice_control(t)]
+                u = action[:, t].clone() # self._slice_control(t)]
                 # cu = torch.max(torch.min(u, self.u_max), self.u_min)
-                v_norm = torch.linalg.norm(u, axis=1)
-                cu = u.clone()
-                # if v_norm > self.u_max:
-                # print(action.shape)
-                cu[:,0] = u[:,0] / v_norm * self.u_max
-                cu[:,1] = u[:,1] / v_norm * self.u_max
-                action[:, t]=cu # self._slice_control(t)] = cu
+                if self.kinematics == "holonomic":
+                    v_norm = torch.linalg.norm(u, axis=-1)
+                    cu = u.clone()
+                    # pdb.set_trace()
+                    # if v_norm > self.u_max:
+                        # print(action.shape)
+                    ind = torch.where(v_norm > self.u_max)[0] # for holonomic dynamics
+                    # TODO: implement for unicycle dynamics
+                    cu[ind,0] = u[ind,0] / v_norm[ind] * self.u_max
+                    cu[ind,1] = u[ind,1] / v_norm[ind] * self.u_max
+                elif self.kinematics == "unicycle":
+                    cu = u.clone()
+                    cu[:,0] = torch.max(torch.min(u[:,0], self.u_max[0]), self.u_min[0])
+                    cu[:,1] = torch.max(torch.min(u[:,1], self.u_max[1]), self.u_min[1])
+                bounded_action[:, t]=cu.clone() # self._slice_control(t)] = cu
                 if self.sample_null_action:
-                    action[self.K - 1] = 0
-        return action
+                    bounded_action[self.K - 1] = 0
+        return bounded_action
 
     def _slice_control(self, t):
         return slice(t * self.nu, (t + 1) * self.nu)
@@ -443,14 +462,22 @@ class MPPI_Planner():
         
     def _init_mppi(self):
         nx = 2
-        noise_sigma = torch.eye(nx, device=self.device, dtype=torch.double)*2.
+        noise_sigma = torch.diag(torch.rand(nx, dtype=torch.double)*2) # torch.eye(nx, device=self.device, dtype=torch.double)
         N_SAMPLES = self.config.diffstack.num_samples
         TIMESTEPS = self.lookahead_steps
         lambda_ = self.config.diffstack.lambda_
-        ACTION_LOW = -self.config.robot.v_pref # Not used
-        ACTION_HIGH = self.config.robot.v_pref
+        self.kinematics = self.config.action_space.kinematics
+        if self.kinematics == "holonomic":
+            ACTION_LOW = -self.config.robot.v_pref # Not used
+            ACTION_HIGH = self.config.robot.v_pref
+        elif self.kinematics == "unicycle":
+            ACTION_LOW = torch.tensor([0., -np.pi*self.config.robot.w_max], dtype=torch.double, device=self.device)
+            ACTION_HIGH = torch.tensor([self.config.robot.v_pref, self.config.robot.w_max], dtype=torch.double, device=self.device)
+        else:
+            raise ValueError("Invalid kinematics")
         
-        self.mppi_gym = MPPI(self.dynamics, self.running_cost, nx, noise_sigma, num_samples=N_SAMPLES, horizon=TIMESTEPS,
+        
+        self.mppi_gym = MPPI(self.dynamics, self.kinematics, self.running_cost, nx, noise_sigma, num_samples=N_SAMPLES, horizon=TIMESTEPS,
                          lambda_=lambda_, device=self.device, u_min=torch.tensor(ACTION_LOW, dtype=torch.double, device=self.device),
                          u_max=torch.tensor(ACTION_HIGH, dtype=torch.double, device=self.device), u_per_command=self.lookahead_steps,
                         step_dependent_dynamics=False, sample_null_action=True)
@@ -462,7 +489,17 @@ class MPPI_Planner():
         # print(state.shape, action.shape)
         
         # State only containes robot's position
-        next_r_state = state + action * self.time_step
+        if self.kinematics == "holonomic":
+            next_r_state = state + action * self.time_step
+        elif self.kinematics == "unicycle":
+            next_theta = (state[...,2] + action[...,1]) % (2 * torch.pi)
+            next_vx = action[...,0] * torch.cos(next_theta) 
+            next_vy = action[...,0] * torch.sin(next_theta) 
+            next_x = state[...,0] + next_vx * self.time_step
+            next_y = state[...,1] + next_vy * self.time_step
+            next_r_state = torch.stack([next_x, next_y, next_theta], dim=-1)
+        else:
+            raise ValueError("Invalid kinematics")        
         return next_r_state
     
     def visualize_traj(self,r_state, next_r_state, goal_pos):
@@ -484,7 +521,7 @@ class MPPI_Planner():
         ax.set_ylim(-6, 6)
         ax.set_xlabel('x(m)', fontsize=16)
         ax.set_ylabel('y(m)', fontsize=16)
-        ax.plot(r_state[0,0,0].cpu(), r_state[0,0,1].cpu(), 'bo', markersize=10)
+        ax.plot(r_state[0,:,0].cpu(), r_state[0,:,1].cpu(), 'bo', markersize=10)
         ax.plot(next_r_state[0,:,0].cpu(), next_r_state[0,:,1].cpu(), 'ro', markersize=10)
         ax.plot(goal_pos[0].cpu(), goal_pos[1].cpu(), 'go', markersize=10)
         ax.set_title("Robot's current and sampled next state")
@@ -565,40 +602,20 @@ class MPPI_Planner():
         plt.savefig("mppi_sanitycheck/vis_" + str(k)+".png")
         
 
-    def running_cost(self, state, ob, decoded, action, t):
+    def running_cost(self, state, ob, next_state, decoded, t):
         """
         state: robot's state at t (batch, K, 2). Note that this is not the current state but a rolled state.
         ob: human's state at curr_t:curr_t+look_ahead (batch, K, 1+lookahead_steps, human_num, 7) 
         """
-        # TODO: update the obs to full sequence in this file and also mppi.py. And make it dependent on t.
-        
-        # TODOV: !!!!! state is already a next state. Currently it's not taking account the disambiguating cost for the first step. 
-        # Maybe delete the first dynamics call before this function call???
-        
-        # cur_t = t + self.sequence # t starts from 0
-        # obs = obs.reshape(self.full_sequence,1+self.human_num, 7)
-        r_state = state
+        if self.kinematics == "holonomic":
+            r_state = state
+            next_r_state = next_state # self.dynamics(state, action)#.unsqueeze(-2)
+        elif self.kinematics == "unicycle":
+            r_state = state[:,:,:2]
+            next_r_state = next_state[:,:,:2]
+            
         r_radius = torch.tensor(self.config.robot.radius, device=self.device).repeat(r_state.shape[0],r_state.shape[1]) # (batch, K)
-        # self.r_goal = state[:, 4:6]
-        # next_r_goal = self.r_goal #state[cur_t+1, 0, 4:6] # should be the same as r_goal in our case
-        next_r_state = self.dynamics(state, action)#.unsqueeze(-2)
-        
-        ########### Costs based on ego's state vector ###########
-        ## reaching goal
-        # goal_reaching_reward = self.config.reward.success_reward
-        goal_reaching_c = torch.tensor(0.0).repeat(r_state.shape[1])
-        goal_reaching_c = torch.where(torch.linalg.norm(next_r_state - torch.tensor(self.r_goal), axis=-1) < r_radius,
-                                      torch.tensor(self.config.reward.success_reward),
-                                      torch.tensor(0.0)).view(-1)
-        
-        ## moving towards the goal
-        potential_cur = torch.linalg.norm(r_state - torch.tensor(self.r_goal), axis=-1)
-        potential_next = torch.linalg.norm(next_r_state - torch.tensor(self.r_goal), axis=-1)
-        potential_c = torch.tensor(2.) * (potential_next-potential_cur) # (batch, K) # penalty if moving away from the goal (potential increases)
-        # No potential cost if the robot is already at the goal
-        # potential_c = torch.where(potential_cur < r_radius, torch.tensor(0.0), potential_c).view(-1)
-        potential_c = torch.where(goal_reaching_c > 0., torch.tensor(0.0), potential_c).view(-1)
-
+        r_goal = torch.tensor(self.r_goal, device=self.device).repeat(r_state.shape[0],r_state.shape[1],1) # (batch, K)
         
         ########### Costs based on ego's observation OGM ###########
         # Collision cost (in the next state) 
@@ -618,12 +635,10 @@ class MPPI_Planner():
         next_sensor_grid = generateSensorGrid(next_label_grid, next_human_pos, h_radius, next_robot_pos, next_map_xy, FOV_radius, res=grid_res)
          
         # Create collision mask for each (batch, K): Ego in the center
-        # collision_mask = torch.zeros(x_local.shape, device=self.device)
         robot_mask = torch.sqrt((next_x_local - next_r_state[:,:,0].reshape(-1,1,1))**2 + (next_y_local - next_r_state[:,:,1].reshape(-1,1,1))**2) < r_radius.reshape(-1, 1, 1) # (K, height, width)
-        # r_mask = torch.sqrt((x_local - next_r_state[:,:,0].reshape(-1,1,1))**2 + (y_local - next_r_state[:,:,1].reshape(-1,1,1))**2) < 0.001 # r_radius # (K, height, width)
 
         # Compute collision cost checking collision using "sensor_grid" (observation, not the ground truth) and collision mask.
-        next_occupancy_grid = deepcopy(next_sensor_grid)
+        next_occupancy_grid = next_sensor_grid.clone()
         next_occupancy_grid = torch.where(next_occupancy_grid==1., torch.tensor(1.0), torch.tensor(0.0))
         collision_cost_grid = next_sensor_grid * robot_mask
         # penalty based on the number of collided grid cells
@@ -637,17 +652,26 @@ class MPPI_Planner():
         
         discomfort_mask = torch.sqrt((next_x_local - next_r_state[:,:,0].reshape(-1,1,1))**2 + (next_y_local - next_r_state[:,:,1].reshape(-1,1,1))**2) < r_radius.view(-1, 1, 1)+discomfort_dist
         # # Don't count discomfort if there is a collision
-        # # zero_mask = torch.zeros_like(discomfort_mask)
-        # collision_sample_idx = torch.where(collision_cost_grid>0)[0]
-        # if len(collision_sample_idx) > 0: # for the collision samples, set the discomfort mask to zero (ignore)
-        #     discomfort_mask[collision_sample_idx] = torch.zeros_like(discomfort_mask[0])
-        # discomfort_mask = torch.logical_and(discomfort_mask, ~robot_mask)
     
         discomfort_cost_grid = next_occupancy_grid * discomfort_mask
         # penalty based on the number of discomfort grid cells
         discomfort_c = torch.sum(discomfort_cost_grid, dim=(1,2))# * discomfort_penalty_factor
         # penalty based on discomfort flag, not the number of grid cells
         discomfort_c = torch.where(torch.logical_and(discomfort_c>0., collision_c==0.), discomfort_penalty_factor, torch.tensor(0.))     
+        
+        ########### Costs based on ego's state vector ###########
+        ## reaching goal
+        goal_reaching_c = torch.tensor(0.0).repeat(r_state.shape[1])
+        goal_reaching_c = torch.where(torch.logical_and(torch.linalg.norm(next_r_state - r_goal, axis=-1) < r_radius, collision_c==0.),
+                                      torch.tensor(self.config.reward.success_reward),
+                                      torch.tensor(0.0)).view(-1)
+        
+        ## moving towards the goal
+        potential_cur = torch.linalg.norm(r_state - r_goal, axis=-1)
+        potential_next = torch.linalg.norm(next_r_state - r_goal, axis=-1)
+        potential_c = torch.tensor(2.) * (potential_next-potential_cur) # (batch, K) # penalty if moving away from the goal (potential increases)
+        # No potential cost if the robot is already at the goal
+        potential_c = torch.where(goal_reaching_c > 0., torch.tensor(0.0), potential_c).view(-1)
         
         if self.config.reward.disambig_reward_flag:
             # ## Compute disambiguating cost, which gives a "reward" for reducing the entropy in the following time step
@@ -684,15 +708,9 @@ class MPPI_Planner():
             # # pas_integrated_grid = torch.where(pas_mask, decoded_in_unknown, transferred_sensor_grid)
             
             next_empty_grid = torch.zeros_like(self.curr_sensor_grid)
-            # next_sensor_grid = next_sensor_grid.to(next_empty_grid.dtype)
             ## TODO: make the untransferred areas to be unknown (0.5) in the transferred grid?
             transferred_next_sensor_grid = Transfer_to_EgoGrid(next_map_xy, next_sensor_grid, self.curr_map_xy, next_empty_grid, grid_res) # decoded in next time (t=1)      
-            # next_pas_integrated_grid = torch.where(decoded_in_unknown, decoded_in_unknown, transferred_next_sensor_grid)
-            # compare map_xy with self.curr_map_xy to transfer pas_inf_grid info to the sensor_grid coordinate
-            # decoded[sensor_grid!=0.5] = torch.tensor(0.0)
-            
-            # # TODO: need pas_inf_grid's x_local and y_local to find where the estimation is located in the rolled grid
-            # H_cur, disambig_R_map = compute_disambig_cost(r_state.squeeze(0), transferred_sensor_grid, decoded_in_unknown, self.r_goal, self.config)
+
             H_next, disambig_R_map_next, disambig_W_map_next = compute_disambig_cost(next_r_state.squeeze(0), self.curr_map_xy, transferred_next_sensor_grid, self.curr_sensor_grid, decoded_in_unknown, self.r_goal, self.config)
             
             # If next entropy is reduced big (H_cur-H_next), then lower the cost. If not, increase the cost.
@@ -741,35 +759,7 @@ class MPPI_Planner():
         else:
             self.disambig_R_map = self.curr_sensor_grid.repeat(next_r_state.shape[1],1,1)
             disambig_c = torch.tensor(0.0).to(self.device)
-        
-                
-        ########### Costs based on obs vector states ###########
-        # repeated_next_r_state = next_r_state.unsqueeze(-2).repeat(1,1,self.human_num,1)
-        # dist = torch.linalg.norm(h_state - repeated_next_r_state, dim=-1) # (batch, K, human_num)
-        # dmin = torch.min(dist, axis=-1) # (batch, K)
-        # # Only consider the closest human
-        # hr = h_radius[torch.arange(h_radius.shape[0]), torch.arange(h_radius.shape[1]), dmin.indices] # (batch,K)
-        
-        # # compute the collision cost for each (batch, K)
-        # collision_c = torch.where(dmin.values < (hr + r_radius),
-        #                   torch.tensor(collision_penalty),
-        #                   torch.tensor(0))
-        
-        # # collision_c = torch.tensor(collision_penalty) if dmin < hr + r_radius else 0
-        
-        ########### Discomfort costs based on ego's state vector ###########
-        # discomfort_dist = self.config.reward.discomfort_dist
-        # discomfort_penalty_factor = self.config.reward.discomfort_penalty_factor
-        # # if collision_c == 0 and dmin<discomfort_dist: # don't count if collision
-        # #     discomfort_c = (dmin - discomfort_dist) * discomfort_penalty_factor * self.time_step
-        
-        # discomfort_c = torch.where(torch.logical_and(collision_c == 0, dmin.values <discomfort_dist),
-        #                            (dmin.values - discomfort_dist) * discomfort_penalty_factor * self.time_step,
-        #                            torch.tensor(0.0))
-         
-        # H_cur = compute_disambig_cost(ob[:, :,t], state, self.r_goal, self.config)
-        # H_next = compute_disambig_cost(ob[:, :, t+1], next_r_state, next_r_goal, self.config)
-        # disambig_c = H_next-H_cur # torch.clamp(H_next-H_cur,min=0.0)
+            # self.visualize_traj(r_state, next_r_state, self.r_goal)
         
         ## Check if there were any collisions                
         # goal_reaching_c = 0 or -5
@@ -796,12 +786,12 @@ class MPPI_Planner():
         """
 
         sequence = config.pas.sequence
-        state = deepcopy(obs['mppi_vector'][0,sequence-1, 0]) # (1, 7) robot's current state
-        ob = deepcopy(obs['mppi_vector'][0,sequence-1:, 1:]) # Using vector states (1+lookahead_steps, human_num, 7) human's current and future states
-        self.curr_label_grid = deepcopy(obs['label_grid'][0, 0]) # (1, 2,  H, W)
-        self.curr_sensor_grid = deepcopy(obs['grid'][0, -1]) # (1,sequence, H, W)
-        self.curr_map_xy = deepcopy(obs['grid_xy'][0])
-        vis_ids = torch.unique(deepcopy(obs['vis_ids'][0]))
+        state = obs['mppi_vector'][0,sequence-1, 0].clone() # (1, 7) robot's current state
+        ob = obs['mppi_vector'][0,sequence-1:, 1:].clone() # Using vector states (1+lookahead_steps, human_num, 7) human's current and future states
+        self.curr_label_grid = obs['label_grid'][0, 0].clone() # (1, 2,  H, W)
+        self.curr_sensor_grid = obs['grid'][0, -1].clone() # (1,sequence, H, W)
+        self.curr_map_xy = obs['grid_xy'][0].clone()
+        vis_ids = torch.unique(obs['vis_ids'][0]).clone()
         # print('all vis_ids', vis_ids)
         if len(vis_ids) > 1:
             self.vis_ids = vis_ids[1:] # remove dummy id (-1)
@@ -813,7 +803,7 @@ class MPPI_Planner():
         propagated_states, action = self.mppi_gym.command(state, ob, decoded)
         
         ## Copy obs['mppi_vector'] and assign the propated_states to the robot's states
-        final_traj = deepcopy(obs['mppi_vector'][:, sequence-1:, :, :4])
+        final_traj = obs['mppi_vector'][:, sequence-1:, :, :4].clone()
         final_traj[0,1:,0, :2] = propagated_states
         final_traj[0,1:,0, 2:] = action # velocity
                 

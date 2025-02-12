@@ -7,7 +7,7 @@ class BaseConfig(object):
 class Config(object):
     env = BaseConfig()
     env.time_limit = 50 
-    env.time_step = 0.25
+    env.time_step = 0.25 #0.25
     env.val_size = 100
     env.test_size = 500  # TODO: change back to 500
     env.randomize_attributes = False # False for turtlebot experiment
@@ -24,11 +24,11 @@ class Config(object):
 
     sim = BaseConfig()
     sim.collectingdata = False #False #False # or True  
-    sim.train_val_sim ="circle_crossing" #"circle_crossing"  # 'static_obstacles'
-    sim.test_sim = "circle_crossing" #"circle_crossing"  # 'static_obstacles'
+    sim.train_val_sim = "circle_crossing" #'static_obstacles' # "circle_crossing" #"circle_crossing"  # 'static_obstacles'
+    sim.test_sim = "circle_crossing" #'static_obstacles' # "circle_crossing" #"circle_crossing"  # 'static_obstacles'
     sim.square_width = 10
-    sim.circle_radius = 4
-    sim.human_num = 20 #6 # 12  # 6 # 4 for turtlebot experiment
+    sim.circle_radius = 5
+    sim.human_num = 12 # 12 #6 # 12  # 6 # 4 for turtlebot experiment
 
     humans = BaseConfig()
     humans.visible = True
@@ -62,11 +62,13 @@ class Config(object):
     # srnn for now
     robot.policy = 'pas_mppi' #'pas_mppi' #'pas_diffstack' #'pas_rnn'  #'orca' 
     robot.radius = 0.3
+    robot.w_max = 0.5 # for unicycle. robot.w_max*PI
     robot.v_pref = 2 #2 # 0.5 for the turtlebot experiment
     robot.sensor = "coordinates"
     # FOV = this values * PI
-    robot.FOV = 2.
-    robot.FOV_radius = 3.0
+    robot.FOV = 2. # radius of the FOV
+    robot.FOV_radius = 2.5
+    robot.disambig_angle = 0.6
     robot.limited_path = False  
     robot.onedim_action = False 
     robot.loop = 1
@@ -79,7 +81,7 @@ class Config(object):
 
     action_space = BaseConfig()
     # holonomic or unicycle
-    action_space.kinematics = "holonomic" #"holonomic"  # unicycle for the turtlebot experiment
+    action_space.kinematics = "unicycle" #"holonomic"  # unicycle for the turtlebot experiment
 
     # config for ORCA
     orca = BaseConfig()

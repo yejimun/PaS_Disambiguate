@@ -17,7 +17,6 @@ from rl.model import Policy
 from rl.pas_rnn_model import Label_VAE, Sensor_VAE
 from rl.storage import RolloutStorage
 from evaluation_mppi import evaluate as evaluate_mppi
-from evaluation import evaluate
 from mppi.mppi import MPPI_Planner
 from test import test
 from crowd_sim import *
@@ -62,7 +61,6 @@ def main():
 	logging.basicConfig(level=level, handlers=[stdout_handler, file_handler],
 						format='%(asctime)s, %(levelname)s: %(message)s', datefmt="%Y-%m-%d %H:%M:%S")
 
-	
 	torch.manual_seed(algo_args.seed)
 	torch.cuda.manual_seed_all(algo_args.seed)
      
@@ -166,22 +164,22 @@ def main():
 	# 	eps=algo_args.eps,
 	# 	max_grad_norm=algo_args.max_grad_norm)
  
-	obs = envs.reset()
-	if isinstance(obs, dict):
-		for key in obs:
-			rollouts.obs[key][0].copy_(obs[key])
-	else:
-		rollouts.obs[0].copy_(obs)
+	# obs = envs.reset()
+	# if isinstance(obs, dict):
+	# 	for key in obs:
+	# 		rollouts.obs[key][0].copy_(obs[key])
+	# else:
+	# 	rollouts.obs[0].copy_(obs)
 
-	rollouts.to(device)
-
-
-	recurrent_hidden_states = {}
-	for key in rollouts.recurrent_hidden_states:
-		recurrent_hidden_states[key] = rollouts.recurrent_hidden_states[key][0]
+	# rollouts.to(device)
 
 
-	episode_rewards = deque(maxlen=100)
+	# recurrent_hidden_states = {}
+	# for key in rollouts.recurrent_hidden_states:
+	# 	recurrent_hidden_states[key] = rollouts.recurrent_hidden_states[key][0]
+
+
+	# episode_rewards = deque(maxlen=100)
 
 	start = time.time()
 	num_updates = int(

@@ -76,11 +76,10 @@ class Agent(object):
             self.v = np.sqrt(self.vx**2 + self.vy**2)
             self.theta = np.arctan2(self.vy, self.vx)     
         else:
-            self.theta = a1
-            self.v = a2
-            self.vx = v * np.cos(theta)
-            self.vy = v * np.sin(theta)
-
+            self.v = a1
+            self.theta = (self.theta + a2) % (2 * np.pi) #- np.pi
+            self.vx = self.v * np.cos(self.theta)
+            self.vy = self.v * np.sin(self.theta)
         
     # self.px, self.py, self.vx, self.vy, self.radius, self.gx, self.gy, self.v_pref, self.theta
     def set_list(self, px, py, vx, vy, radius, gx, gy, v_pref, theta):
