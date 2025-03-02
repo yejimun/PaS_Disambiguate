@@ -7,6 +7,7 @@ from crowd_sim.envs.utils.robot import Robot
 from crowd_sim.envs.utils.info import *
 from crowd_nav.policy.orca import ORCA
 from crowd_sim.envs.utils.state import *
+from prediction.traj_prediction import TrajPrediction
 
 
 class CrowdSim(gym.Env):
@@ -166,6 +167,11 @@ class CrowdSim(gym.Env):
         # set robot for this envs
         rob_RL = Robot(config, 'robot')
         self.set_robot(rob_RL)
+
+        # configure the prediction model if using inferred for humans
+        if config.sim.predict_method == 'inferred':
+            self.prediction = TrajPrediction(config)
+
         return
 
 

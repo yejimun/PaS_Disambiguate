@@ -743,18 +743,38 @@ class CrowdSimDict(CrowdSim):
         Update robot and human states for a lookahead step
         """
         lookahead_states = []
-        for i in range(lookahead_steps):
-            # ! Don't update robot_states. 
-            # # TODO: Updating the robot action is not implemented yet, doesn't affect the current implementation.
 
-            # (i) Using ground truth human states/actions                    
-            human_actions = self.get_human_actions(human_states, robot_states)
-            for i, human_action in enumerate(human_actions):
-                human_states[i].step(human_action)
-                
-            # (ii) TODO: Using the repeated same action of human states 
-            
-            lookahead_states.append([robot_states.get_diff_state(), *[human.get_diff_state() for human in human_states]])
+        if self.config.sim.predict_method == 'inferred':
+            # predicting the whole lookahead_steps at once
+            obs_seq = np.array(self.states_list[-self.config.pas.sequence:])[:,1:,:] # px, py, vx, vy, gx, gy, r
+            mask = np.ones_like(obs_seq)[:,:,0] # assuming all humans are present at all times (true for the ORCA model)
+            pred_states, _ = self.prediction.forward(obs_seq, mask)
+            # add robot (repeated states). robot's updated states is not implemented yet, doesn't affect the current implementation.
+            robot_state = robot_states.get_diff_state()
+            robot_state_rp = torch.tensor(robot_state).view(1, 1, len(robot_state)).repeat(pred_states.shape[0],1,1)
+            pred_states = torch.cat([robot_state_rp, pred_states], dim=1)
+            lookahead_states = pred_states.tolist()
+
+        else:
+            for i in range(lookahead_steps):
+                # ! Don't update robot_states. 
+                # # TODO: Updating the robot action is not implemented yet, doesn't affect the current implementation.
+
+                # (i) Using ground truth human states/actions
+                if self.config.sim.predict_method == 'truth':               
+                    human_actions = self.get_human_actions(human_states, robot_states)
+                    for i, human_action in enumerate(human_actions):
+                        human_states[i].step(human_action)
+
+                elif self.config.sim.predict_method == 'const_vel':
+                    for human in human_states:
+                        human_action = ActionXY(human.vx, human.vy) # keep the same velocity
+                        human.step(human_action)
+                else:
+                    raise NotImplementedError 
+                    
+                lookahead_states.append([robot_states.get_diff_state(), *[human.get_diff_state() for human in human_states]])
+
         return lookahead_states
     
 

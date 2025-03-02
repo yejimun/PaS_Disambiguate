@@ -28,7 +28,11 @@ class Config(object):
     sim.test_sim = "circle_crossing" #'static_obstacles' # "circle_crossing" #"circle_crossing"  # 'static_obstacles'
     sim.square_width = 10
     sim.circle_radius = 5
-    sim.human_num = 12 # 12 #6 # 12  # 6 # 4 for turtlebot experiment
+    sim.human_num = 20 # 12 #6 # 12  # 6 # 4 for turtlebot experiment
+    # 'truth': ground truth future traj
+    # 'const_vel': constant velocity model,
+    # 'inferred': inferred future traj from prediction model
+    sim.predict_method = 'inferred' # using "CollisionGrid" model
 
     humans = BaseConfig()
     humans.visible = True
