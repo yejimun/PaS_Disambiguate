@@ -8,6 +8,7 @@ import torch
 from torch.distributions.multivariate_normal import MultivariateNormal
 from functorch import vmap
 from matplotlib import pyplot as plt
+from itertools import product
 from arm_pytorch_utilities import handle_batch_input
 from mppi.utils import * # compute_disambig_cost
 from copy import deepcopy
@@ -36,6 +37,9 @@ def _ensure_non_zero(cost, beta, factor):
 # 4/9
 # TODO: Check the sensor_grid_mppi (!!Check the obj_vert_angles!!)
 # TODO: Check if there is a delay in the map and human visibility status. Comparing plotting the disambig map, sensor map, and visibility color.
+
+# 4/21
+# TODOV: Make the robot not affected by the PaS_collision once the occluded agent become visible.
 
 # Set random seed for reproducibility
 seed = 0
@@ -165,10 +169,14 @@ class MPPI():
         self.u_init = u_init.to(self.d)
 
         if self.U is None:
-            actions = torch.tensor([[2,0], [2,2],[0,2], [-2,2], [-2,0],[0,0]], dtype=self.dtype, device=self.d)
+            # actions = torch.tensor([[2,0], [2,2],[0,2], [-2,2], [-2,0],[0,0]], dtype=self.dtype, device=self.d)
+            acc_values = [-0.5, 0.0, 0.5]
+            steer_values = [-torch.pi/6., 0.0, torch.pi/6.]
+            actions = torch.tensor(list(product(acc_values, steer_values)), dtype=torch.double, device=self.d) # all combinations of acceleration and steering            
+            
             num_actions = actions.shape[0]
 
-            # Create T copies of indices 0..5 and meshgrid them
+            # # Create T copies of indices 0..5 and meshgrid them
             grids = torch.meshgrid(*[torch.arange(num_actions) for _ in range(self.T)], indexing='ij')  # shape: (T, ..., ..., ...)
             grid_stack = torch.stack(grids, dim=-1).reshape(-1, self.T)  # shape: (K, T)
 
@@ -268,8 +276,8 @@ class MPPI():
                 state = self._dynamics(state[:2], action[a])
                 propagated_states.append(state)
             elif self.kinematics == "unicycle":
-                state = self._dynamics(state[:3], action[a])
-                propagated_states.append(state[:2])
+                state = self._dynamics(state[:4], action[a])
+                propagated_states.append(state)
             
         propagated_states = torch.stack(propagated_states)
         return propagated_states, action
@@ -304,12 +312,11 @@ class MPPI():
         if self.kinematics == "holonomic":
             state = state.repeat(self.M, 1, 1)[:, :, :2] # repeated current state # TODO: not using self.M
         elif self.kinematics == "unicycle":
-            state = state.repeat(self.M, 1, 1)[:, :, :3] 
+            state = state.repeat(self.M, 1, 1)[:, :, :4] # px, py, theta, v 
 
         
         # (batch, K, pred_horizon, human_num, 7) # repeated obs with pred_horizon
         ob = self.ob.unsqueeze(0).unsqueeze(0).repeat(self.M, K, 1, 1, 1) # vector obs
-
                 
         states = []
         actions = []
@@ -417,13 +424,12 @@ class MPPI():
                     cu[ind,0] = u[ind,0] / v_norm[ind] * self.u_max
                     cu[ind,1] = u[ind,1] / v_norm[ind] * self.u_max
                 elif self.kinematics == "unicycle":
-                    cu = u.clone()
-                    cu[:,0] = torch.max(torch.min(u[:,0], self.u_max[0]), self.u_min[0])
-                    cu[:,1] = torch.max(torch.min(u[:,1], self.u_max[1]), self.u_min[1])
+                    cu = u.clone() # acc.py: bound action should be done in dynamic
+                    # cu[:,0] = torch.clip(u[:,0], self.u_min[0], self.u_max[0]) #torch.max(torch.min(u[:,0], self.u_max[0]), self.u_min[0])
+                    # cu[:,1] = torch.clip(u[:,1], self.u_min[1], self.u_max[1]) #torch.max(torch.min(u[:,1], self.u_max[1]), self.u_min[1])
                 bounded_action[:, t]=cu.clone() # self._slice_control(t)] = cu
                 # if self.sample_null_action:
                 #     bounded_action[self.K - 1] = 0
-                # pdb.set_trace()
         
         return bounded_action
 
@@ -486,8 +492,8 @@ class MPPI_Planner():
             ACTION_LOW = -self.config.robot.v_pref # Not used
             ACTION_HIGH = self.config.robot.v_pref
         elif self.kinematics == "unicycle":
-            ACTION_LOW = torch.tensor([0., -np.pi*self.config.robot.w_max], dtype=torch.double, device=self.device)
-            ACTION_HIGH = torch.tensor([self.config.robot.v_pref, self.config.robot.w_max], dtype=torch.double, device=self.device)
+            self.u_min = ACTION_LOW = torch.tensor([0., -np.pi*self.config.robot.w_max], dtype=torch.double, device=self.device)
+            self.u_max = ACTION_HIGH = torch.tensor([self.config.robot.v_pref, self.config.robot.w_max], dtype=torch.double, device=self.device)
         else:
             raise ValueError("Invalid kinematics")
         
@@ -512,9 +518,10 @@ class MPPI_Planner():
         if self.kinematics == "holonomic":
             next_r_state = state + action * self.time_step
         elif self.kinematics == "unicycle":
+            #### acc.py#############
             theta = state[...,2] 
-            epsilon = 0.0001
-            
+            v = torch.clip(state[...,3] + action[...,0] * self.time_step, self.u_min[0], self.u_max[0])  # v' = v + a*dt     
+            # differential drive            
             w = action[...,1]/self.time_step # action.r is delta theta
             R = action[...,0]/w
 
@@ -523,13 +530,14 @@ class MPPI_Planner():
             
             epsilon = 0.0001       
             mask = torch.abs(action[...,1]) < epsilon
-            
-            next_x[mask] = state[mask][...,0] + action[...,0][mask] * self.time_step * torch.cos(theta[mask])
-            next_y[mask] = state[mask][...,1] + action[...,0][mask] * self.time_step * torch.sin(theta[mask])
-            
 
+            next_x[mask] = state[mask][...,0] + v[mask] * self.time_step * torch.cos(theta[mask])
+            next_y[mask] = state[mask][...,1] + v[mask] * self.time_step * torch.sin(theta[mask])
+                
             next_theta = (theta+ action[...,1]) % (2 * np.pi) # action[...,1]: angular change, not angular velocity (w).
-            next_r_state = torch.stack([next_x, next_y, next_theta], dim=-1)
+            next_r_state = torch.stack([next_x, next_y, next_theta, v], dim=-1)
+            # pdb.set_trace()
+            ######################
         else:
             raise ValueError("Invalid kinematics")        
         return next_r_state
@@ -586,9 +594,7 @@ class MPPI_Planner():
         # plt.title("Visible ids: " + str(self.vis_ids))
         plt.savefig(save_dir+"/vis_traj_" + str(k)+".png")
         plt.close()
-        
-        
-        
+                
     
     def visualize_disambig_traj(self,r_state, next_r_state, goal_pos, highlight_indices=None, map_xy=None, sensor_grid=None, wall_polygons=None, h_states=None, lowest_cost_ind=None, cost=None):
         """
@@ -724,20 +730,40 @@ class MPPI_Planner():
         # Generate label grid
         FOV_radius = self.config.robot.FOV_radius
         grid_res = self.config.pas.grid_res
+        discomfort_dist = self.config.reward.discomfort_dist
+        discomfort_penalty_factor = self.config.reward.discomfort_penalty_factor
         
         ########## Collision costs based on ego's state vector##################
         next_h_state = ob[:, :, t+1, :, :2] # (batch, K, human_num, 2)
-        h_radius = ob[:, :, t+1, :, -1] 
+        h_radius = ob[:, :, t+1, :, -1] # (batch, K, human_num, 1)
         collision_penalty = self.config.reward.collision_penalty
         
         repeated_next_r_state = next_r_state.unsqueeze(-2).repeat(1,1,self.human_num,1)
-        dist = torch.linalg.norm(next_h_state - repeated_next_r_state, dim=-1) # (batch, K, human_num)
-        dmin = torch.min(dist, axis=-1) # (batch, K)
+        
+        ######## acc.py ########
+        # Make invisible humans a far away dummy value
+        decoded_in_unknown = torch.where(self.curr_sensor_grid==0.5, decoded[0,0], torch.tensor(0.0))
+        decoded_human_id = torch.unique(self.curr_label_grid[1][decoded_in_unknown>0.4,])
+        
+        next_vis_h_state = next_h_state.clone()
+        if len(decoded_human_id)>0:
+            if len(decoded_human_id)>1: # For debugging in a static human behind wall scenario
+                print(decoded_human_id)
+                pdb.set_trace()
+            for id in decoded_human_id:
+                next_vis_h_state[:,:,int(id)] = torch.tensor([100,100]) # dummy position to invisible human
+        
+        dist = torch.linalg.norm(next_vis_h_state - repeated_next_r_state, dim=-1) # (batch, K, human_num)
+        ################
+        
+        dmin = torch.min(dist, axis=-1)#-r_radius-h_radius[:, torch.argmin(dist, axis=-1)] # (batch, K)
+        
         # Only consider the closest human
-        hr = h_radius[torch.arange(h_radius.shape[0]), torch.arange(h_radius.shape[1]), dmin.indices] # (batch,K)
+        closest_dist = dmin.values -r_radius-h_radius[torch.arange(h_radius.shape[0]), dmin.indices].squeeze(-1) # (batch, K)
+    
         
         # compute the collision cost for each (batch, K)
-        collision_c = torch.where(dmin.values < (hr + r_radius),
+        collision_c = torch.where(closest_dist<0.,
                           torch.tensor(collision_penalty),
                           torch.tensor(0))
         
@@ -752,59 +778,24 @@ class MPPI_Planner():
         # Consider collision only once if collision with both wall and human.
         collision_c = torch.where(collision_wWall, collision_penalty, collision_c)
         
-        
-        # TODO: check collision with PaS estimation
-        if 'pas' in self.config.robot.policy:
-            # decoded: [1,1,100,100]
-            decoded_in_unknown = torch.where(self.curr_sensor_grid==0.5, decoded[0,0], torch.tensor(0.0))
-            
-            # flatten decoded_in_unknown and its x,y coordinate and obtain the estimated occupancy cells
-            decoded_in_unknown = decoded_in_unknown.view(-1)
-            decoded_x = self.curr_map_xy[0].view(-1)
-            decoded_y = self.curr_map_xy[1].view(-1)
-            
-            PaS_occupied_indices = torch.where(decoded_in_unknown>0.4)
-            if len(PaS_occupied_indices[0])>0:
-                PaS_occupied_x = decoded_x[PaS_occupied_indices]
-                PaS_occupied_y = decoded_y[PaS_occupied_indices]
-                PaS_occupied_xy = torch.stack([PaS_occupied_x, PaS_occupied_y], dim=-1) # (N_indices, 2)
-                
-                PaS_occupied_prob = decoded_in_unknown[PaS_occupied_indices] # (N_indices)
-                
-                # compute collision cost for PaS occupied cells.
-                dist_to_PaS_occupied = torch.linalg.norm(PaS_occupied_xy.view(1,1,-1,2) - next_r_state.unsqueeze(2), dim=-1) #(1,1,N_indices, 2) - (batch,K,1, 2) -> (batch,K,N_indices,2) -> (batch,K,N_indices)
-                dmin_to_PaS_occupied =  torch.min(dist_to_PaS_occupied, axis=-1) # (batch,K)
-                dmin_PaS_indicies = dmin_to_PaS_occupied.indices # (batch,K)
-                
-                PaS_collision_c = torch.where(dmin_to_PaS_occupied.values < r_radius,
-                                            torch.tensor(collision_penalty)*PaS_occupied_prob[dmin_PaS_indicies],
-                                            torch.tensor(0.0))
-            else:
-                PaS_collision_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
-        else:
-            PaS_collision_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
-        
                 
         ########## Discomfort costs based on ego's state vector ###########
-        discomfort_dist = self.config.reward.discomfort_dist
-        discomfort_penalty_factor = self.config.reward.discomfort_penalty_factor
         # if collision_c == 0 and dmin<discomfort_dist: # don't count if collision
         #     discomfort_c = (dmin - discomfort_dist) * discomfort_penalty_factor * self.time_step
         
-        dist_to_closest = dmin.values + hr + r_radius
-        discomfort_c = torch.where(torch.logical_and(collision_c == 0, dist_to_closest <discomfort_dist),
-                                   (discomfort_dist-dist_to_closest) * discomfort_penalty_factor * self.time_step,
+        discomfort_c = torch.where(torch.logical_and(collision_c == 0, closest_dist < discomfort_dist),
+                                   (discomfort_dist-closest_dist) * discomfort_penalty_factor * self.time_step,
                                    torch.tensor(0.0))
         
-        # TODO: check discomfort with PaS estimation
-        if 'pas' in self.config.robot.policy and len(PaS_occupied_indices[0])>0:
-            # compute discomfort cost for PaS occupied cells.
-            PaS_dist_to_closest = dmin_to_PaS_occupied.values + r_radius # dmin_to_PaS_occupied already contains the radius of the obstacle.
-            PaS_discomfort_c = torch.where(torch.logical_and(PaS_collision_c == 0, PaS_dist_to_closest <discomfort_dist),
-                                            (discomfort_dist - PaS_dist_to_closest) * discomfort_penalty_factor * self.time_step*PaS_occupied_prob[dmin_PaS_indicies],
-                                            torch.tensor(0.0))                
-        else:
-            PaS_discomfort_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
+        # # TODO: just have PaS_collision_c since they are mostly overlapping.
+        # if 'pas' in self.config.robot.policy and len(PaS_occupied_indices[0])>0:
+        #     # compute discomfort cost for PaS occupied cells.
+        #     PaS_dist_to_closest = dmin_to_PaS_occupied.values + r_radius # dmin_to_PaS_occupied already contains the radius of the obstacle.
+        #     PaS_discomfort_c = torch.where(torch.logical_and(PaS_collision_c == 0, PaS_dist_to_closest <discomfort_dist*2),
+        #                                     (discomfort_dist - PaS_dist_to_closest) * discomfort_penalty_factor * self.time_step*PaS_occupied_prob[dmin_PaS_indicies],
+        #                                     torch.tensor(0.0))                
+        # else:
+        #     PaS_discomfort_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
 
         ########### Costs based on ego's state vector ###########
         ## reaching goal
@@ -820,14 +811,13 @@ class MPPI_Planner():
         # No potential cost if the robot is already at the goal
         potential_c = torch.where(goal_reaching_c > 0., torch.tensor(0.0), potential_c).view(-1)
         
+        # # # TODO: decoded should only be estimating the unobserved areas. Otherwise, it should be the ground truth or zero.        
+        # # # For now just depress it manually.
+        # decoded_in_unknown = torch.where(self.curr_sensor_grid==0.5, decoded[0,0], torch.tensor(0.0))
         if self.config.reward.disambig_reward_flag:
             # ## Compute disambiguating cost, which gives a "reward" for reducing the entropy in the following time step
             # ## Aims to reduce the uncertainty in the unobserved areas & confirm the PaS inference.
             # # Compute PaS inference grid, estimation only in the unobserved areas and with the ground truth in the observed areas, in the time current timestep (t=0)
-            
-            # # # TODO: decoded should only be estimating the unobserved areas. Otherwise, it should be the ground truth or zero.        
-            # # # For now just depress it manually.
-            decoded_in_unknown = torch.where(self.curr_sensor_grid==0.5, decoded[0,0], torch.tensor(0.0))
             
             if t == 0:
                 map_xy = self.curr_map_xy.repeat(next_r_state.shape[1],1,1,1)
@@ -858,9 +848,7 @@ class MPPI_Planner():
             disambig_c = torch.where(torch.logical_or(discomfort_c>0, collision_c>0), torch.tensor(0.0), disambig_c)    
             
             # make the disambig_c flag based regardless of the number of grid cells
-            disambig_c = torch.where(disambig_c<0, -self.config.reward.disambig_factor, torch.tensor(0.0)).squeeze(0)       
-      
-
+            disambig_c = torch.where(disambig_c<0, -self.config.reward.disambig_factor, torch.tensor(0.0)).squeeze(0)    
             
             # # Sanity check
             # if len(collision_sample_idx) > 0: # visualize collision samples
@@ -887,7 +875,7 @@ class MPPI_Planner():
             #     vis_grids.append([curr_map_x, curr_map_y, decoded_in_unknown, "Decoded grid in unknown area"])
             #     # vis_grids.append([next_x_local[k], next_y_local[k], transferred_decoded_in_unknown[k], "Transferred decoded grid to future coordinate"])
             #     # vis_grids.append([next_x_local[k], next_y_local[k], integrated_next_sensor[k], "PaS Integrated next sensor grid "])
-            # #     # vis_grids.append([curr_map_x, curr_map_y, self.curr_label_grid, "Current label grid"])
+            #     vis_grids.append([curr_map_x, curr_map_y, self.curr_label_grid[0], "Current label grid"])
             #     vis_grids.append([curr_map_x, curr_map_y, self.curr_sensor_grid, "Current sensor grid"])
                 
             #     # vis_grids.append([curr_map_x, curr_map_y, decoded[0,k], "PaS inference grid at t=0"])
@@ -902,9 +890,60 @@ class MPPI_Planner():
             self.disambig_R_map = self.curr_sensor_grid.repeat(next_r_state.shape[1],1,1)
             if 'pas' in self.config.robot.policy:
                 self.disambig_R_map = torch.where(self.disambig_R_map==0.5, decoded[0,0], torch.tensor(0.0))
-            disambig_c = torch.tensor(0.0).to(self.device)
+            disambig_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
             # self.visualize_traj(r_state, next_r_state, self.r_goal)
+            
+        # TODO: check collision with PaS estimation
+        # Check if any part of potential occluded agent is seen in the current timestep.
+        # row_indices, col_indices = torch.where(decoded_in_unknown>0.4) # (batch, K, 1)
+        # any_seen_decoded = torch.where(self.curr_sensor_grid[row_indices, col_indices]==1. if len(self.curr_sensor_grid[row_indices, col_indices])>0 else torch.tensor([False]))[0]
+        # print(self.curr_sensor_grid[row_indices, col_indices]==1., any_seen_decoded)
+        
+        any_seen_decoded = self.curr_sensor_grid[decoded[0,0]>0.4]==1 # (batch, K, 1)
+        # print(torch.any(decoded[0,0]>0.4))
+        # print(self.curr_sensor_grid[decoded[0,0]>0.4])
+        # print(torch.any(any_seen_decoded))
 
+        # Once part of potential occluded_agent is seen in the current timestep, no need to consider PaS_colilsion that is very conservative.
+        if 'pas' in self.config.robot.policy and not torch.any(any_seen_decoded):
+            # decoded: [1,1,100,100]            
+            # flatten decoded_in_unknown and its x,y coordinate and obtain the estimated occupancy cells
+            decoded_in_unknown = decoded_in_unknown.view(-1)
+            decoded_x = self.curr_map_xy[0].view(-1)
+            decoded_y = self.curr_map_xy[1].view(-1)
+            
+            PaS_occupied_indices = torch.where(decoded_in_unknown>0.4)
+            if len(PaS_occupied_indices[0])>0:
+                PaS_occupied_x = decoded_x[PaS_occupied_indices]
+                PaS_occupied_y = decoded_y[PaS_occupied_indices]
+                PaS_occupied_xy = torch.stack([PaS_occupied_x, PaS_occupied_y], dim=-1) # (N_indices, 2)
+                
+                PaS_occupied_prob = decoded_in_unknown[PaS_occupied_indices] # (N_indices)
+                
+                # compute collision cost for PaS occupied cells.
+                dist_to_PaS_occupied = torch.linalg.norm(PaS_occupied_xy.view(1,1,-1,2) - next_r_state.unsqueeze(2), dim=-1) #(1,1,N_indices, 2) - (batch,K,1, 2) -> (batch,K,N_indices,2) -> (batch,K,N_indices)
+                dmin_to_PaS_occupied =  torch.min(dist_to_PaS_occupied, axis=-1) # (batch,K)
+                dmin_PaS_indicies = dmin_to_PaS_occupied.indices # (batch,K)
+                closest_dist_PaS = dmin_to_PaS_occupied.values - r_radius # (batch,K)
+                
+                ### PaS collision penalty         
+                # PaS_collision_c = torch.where(closest_dist_PaS<discomfort_dist*5, # For PaS, make "potential collision" distance is larger due to uncertainty.
+                #                             torch.tensor(collision_penalty)*PaS_occupied_prob[dmin_PaS_indicies],
+                #                             torch.tensor(0.0))               
+                ## PaS high speed penalty
+                ### Slow down the robot when there's potential occluded obstacle. This keeps the robot goes straight, instead of taking detour. like PaS_collision_cost
+                PaS_collision_c = torch.where(closest_dist_PaS<discomfort_dist*3, # For PaS, make "potential collision" distance is larger due to uncertainty.
+                                            (next_state[...,3])**2*PaS_occupied_prob.max()*0.3,
+                                            torch.tensor(0.0))   
+                # PaS_collision_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
+            else:
+                PaS_collision_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
+        else:
+            PaS_collision_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
+
+        ### Lane keeping cost
+        # penalize if the robot deviates from the lane (x-=0)
+        lane_keeping_c = next_r_state[...,0]**2 *5        
         
         ## Check if there were any collisions                
         # goal_reaching_c = 0 or -5
@@ -919,50 +958,60 @@ class MPPI_Planner():
         discomfort_c = discomfort_c.view(-1)
         disambig_c = disambig_c.view(-1)
         PaS_collision_c = PaS_collision_c.view(-1)
-        PaS_discomfort_c = PaS_discomfort_c.view(-1)     
+        lane_keeping_c = lane_keeping_c.view(-1)
+        # PaS_discomfort_c = PaS_discomfort_c.view(-1)     
         
-        cost = goal_reaching_c.float() + potential_c + collision_c.float() + discomfort_c.float() + disambig_c.float() + PaS_collision_c.float() + PaS_discomfort_c.float()
-        # [[0,0],[1,0], [-1,0],[0,1],[1,1], [-1,1]]
+        cost = goal_reaching_c.float() + potential_c + collision_c.float() + discomfort_c.float() + disambig_c.float() + PaS_collision_c.float() + lane_keeping_c.float() #+ PaS_discomfort_c.float()
         
-        ## Visualizing critical disambiguation moments with the disambiguating/nondisambiguating actions labeled.
-        interest_indices = torch.where(PaS_discomfort_c!=0)[0] #torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[1]
-        # interest_indices = torch.where(disambig_c!=0)[0]
-        print(disambig_c, interest_indices, torch.abs(H_next-self.H_cur), collision_c, discomfort_c)
-        # if torch.any(torch.abs(H_next-self.H_cur)!=0):
-        #     pdb.set_trace()
-        lowest_cost_ind = torch.argmin(cost)
-        # print(disambig_c, H_next, self.H_cur)
-        if len(interest_indices) > 0:
-            # disambig_indices = disambig_indices[1]
-            ## Visualize when the entropy changes.
-            # disambig_indices = torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[0]
-            # for k in disambig_indices:
-            k = 0
-            curr_map_x, curr_map_y = self.curr_map_xy
-            vis_grids = [[curr_map_x, curr_map_y, next_label_grid[k][0], "Next label grid"]]
-            vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[k], "Next sensor grid1"])
-            vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[1], "Next sensor grid2"])
-            vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[2], "Next sensor grid3"])
-            vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[3], "Next sensor grid4"])
-            vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[4], "Next sensor grid5"])
-            vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[5], "Next sensor grid6"])
-            vis_grids.append([curr_map_x, curr_map_y, disambig_W_map_next[k], "Next disambig W map"])
-            vis_grids.append([curr_map_x, curr_map_y, disambig_R_map_next[k], "Next disambig R map"])
-            vis_grids.append([curr_map_x, curr_map_y, decoded[0,0], "Decoded grid"])
-            vis_grids.append([curr_map_x, curr_map_y, decoded_in_unknown, "Decoded grid in unknown area"])
-            vis_grids.append([curr_map_x, curr_map_y, self.curr_sensor_grid, "Current sensor grid"])
-            # visualize_robot_trajectory as well
-            # self.visualize(vis_grids, self.r_goal, disambig_c[k])
-            
-            cur_h_states = ob[0, [0], t, :, :2] # (1, human_num, 2)
-            self.visualize_disambig_traj(r_state, next_r_state, self.r_goal, interest_indices, self.curr_map_xy, self.curr_sensor_grid, wall_polygons, cur_h_states, lowest_cost_ind, cost)
+        least_cost_idx = torch.argmin(cost)
+        # if torch.any(PaS_collision_c >0):
+        if torch.any(disambig_c<0):
+            print(lane_keeping_c, PaS_collision_c, potential_c, disambig_c)
+            print('least cost:', lane_keeping_c[least_cost_idx], PaS_collision_c[least_cost_idx], potential_c[least_cost_idx], disambig_c[least_cost_idx])
+            print(goal_reaching_c[least_cost_idx], collision_c[least_cost_idx], discomfort_c[least_cost_idx], disambig_c[least_cost_idx])
             # pdb.set_trace()
+        # [[0,0],[1,0], [-1,0],[0,1],[1,1], [-1,1]]
+        # print('state:', state)
+        # print('next_state:', next_state)
+        # print('potent c:', potential_c)
+        # print('cost:', cost)
+        # pdb.set_trace()
+        # ## Visualizing critical disambiguation moments with the disambiguating/nondisambiguating actions labeled.
+        # interest_indices = torch.where(PaS_discomfort_c!=0)[0] #torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[1]
+        # # interest_indices = torch.where(disambig_c!=0)[0]
+        # # print(disambig_c, interest_indices, torch.abs(H_next-self.H_cur), collision_c, discomfort_c)
+
+        # lowest_cost_ind = torch.argmin(cost)
+        # # print(disambig_c, H_next, self.H_cur)
+        # if len(interest_indices) > 0:
+        #     # disambig_indices = disambig_indices[1]
+        #     ## Visualize when the entropy changes.
+        #     # disambig_indices = torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[0]
+        #     # for k in disambig_indices:
+        #     k = 0
+        #     curr_map_x, curr_map_y = self.curr_map_xy
+        #     vis_grids = [[curr_map_x, curr_map_y, next_label_grid[k][0], "Next label grid"]]
+        #     vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[k], "Next sensor grid1"])
+        #     vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[1], "Next sensor grid2"])
+        #     vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[2], "Next sensor grid3"])
+        #     vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[3], "Next sensor grid4"])
+        #     vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[4], "Next sensor grid5"])
+        #     vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[5], "Next sensor grid6"])
+        #     vis_grids.append([curr_map_x, curr_map_y, disambig_W_map_next[k], "Next disambig W map"])
+        #     vis_grids.append([curr_map_x, curr_map_y, disambig_R_map_next[k], "Next disambig R map"])
+        #     vis_grids.append([curr_map_x, curr_map_y, decoded[0,0], "Decoded grid"])
+        #     vis_grids.append([curr_map_x, curr_map_y, decoded_in_unknown, "Decoded grid in unknown area"])
+        #     vis_grids.append([curr_map_x, curr_map_y, self.curr_sensor_grid, "Current sensor grid"])
+        #     # visualize_robot_trajectory as well
+        #     # self.visualize(vis_grids, self.r_goal, disambig_c[k])
+            
+        #     cur_h_states = ob[0, [0], t, :, :2] # (1, human_num, 2)
+        #     self.visualize_disambig_traj(r_state, next_r_state, self.r_goal, interest_indices, self.curr_map_xy, self.curr_sensor_grid, wall_polygons, cur_h_states, lowest_cost_ind, cost)
         
         
         # discomfort_indices = torch.where(torch.logical_and(discomfort_c> 0,collision_c==0.))[1]
         # print(discomfort_c, dmin.values+ hr+r_radius, discomfort_dist)
         # if len(discomfort_indices) > 0:
-        #     pdb.set_trace()
         #     # disambig_indices = disambig_indices[1]
         #     ## Visualize when the entropy changes.
         #     # disambig_indices = torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[0]
@@ -979,9 +1028,7 @@ class MPPI_Planner():
         #         self.visualize(vis_grids, self.r_goal, disambig_c[k])
             
         #     self.visualize_disambig_traj(r_state, next_r_state, self.r_goal, discomfort_indices, self.curr_map_xy, self.curr_sensor_grid)
-        #     pdb.set_trace()
         
-        # pdb.set_trace()
         # print('t:', t, 'cost', cost[torch.where(disambig_c>0)], 'goal', goal_reaching_c[torch.where(disambig_c>0)], 'potential', potential_c[torch.where(disambig_c>0)], 'collision', collision_c[torch.where(disambig_c>0)], 'discomfort', discomfort_c[torch.where(disambig_c>0)], 'disambig', disambig_c[torch.where(disambig_c>0)])
         
         # if torch.any(disambig_c != 0) or torch.any(discomfort_c > 0) or torch.any(collision_c>0):
@@ -1010,7 +1057,7 @@ class MPPI_Planner():
         sequence = config.pas.sequence
         state = obs['mppi_vector'][0,sequence-1, 0].clone() # (1, 7) robot's current state
         ob = obs['mppi_vector'][0,sequence-1:, 1:].clone() # Using vector states (1+lookahead_steps, human_num, 7) human's current and future states
-        self.curr_label_grid = obs['label_grid'][0, 0].clone() # (1, 2,  H, W)
+        self.curr_label_grid = obs['label_grid'][0].clone() # (1, 2,  H, W)
         self.curr_sensor_grid = obs['grid'][0, -1].clone()  # (1,sequence, H, W)
         self.curr_map_xy = obs['grid_xy'][0].clone() 
         vis_ids = torch.unique(obs['vis_ids'][0]).clone() 
@@ -1025,9 +1072,16 @@ class MPPI_Planner():
         
         ## Copy obs['mppi_vector'] and assign the propated_states to the robot's states
         final_traj = obs['mppi_vector'][:, sequence-1:, :, :4].clone() # (1, 1+lookahead_steps, 1+human_num, 4)
-        final_traj[0,1:,0, :2] = propagated_states # (lookahead_steps, 2)
-        final_traj[0,1:,0, 2:] = action # velocity # (lookahead_steps, 2)
-                
+        
+        ### acc.py ###
+        final_traj[0,1:,0, :2] = propagated_states[...,:2] # (lookahead_steps, 2) 
+        # convert acceleration action[...,0], to velocity
+        prev_states = torch.vstack([state[...,:4].unsqueeze(0), propagated_states[:-1]]) # (1+lookahead_steps, 4)
+        v = prev_states[...,3] + action[...,0] * self.time_step
+        action_vr = action.clone()
+        action_vr[...,0] = v  
+        final_traj[0,1:,0, 2:] = action_vr # velocity # (lookahead_steps, 2)
+        #### 
         final_traj = final_traj.permute(0,2,1,3).reshape(-1,1) # (1, 1+human_num, 1+lookahead_steps, 4) 
         return final_traj, self.disambig_R_map
         

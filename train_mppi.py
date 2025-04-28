@@ -75,10 +75,8 @@ def main():
 			torch.backends.cudnn.deterministic = False
 
 
-
 	torch.set_num_threads(algo_args.num_threads)
 	device = torch.device("cuda" if algo_args.cuda else "cpu")
-
 
 
 	summary_path = algo_args.output_dir+'/runs_gradient'
@@ -115,12 +113,14 @@ def main():
 	# actor_critic.base.nenv = 1 # TODO: use multi envs
  
 	# Load PaS model 
-	label_ckpt_dir = 'data/crossing_H12/label_vae_ckpt/label_weight_300.pth'
-	label_vae = Label_VAE(algo_args).to(device)
-	label_vae.load_state_dict(torch.load(label_ckpt_dir))
-	pas_ckpt_dir = 'data/crossing_H12/sensor_vae_woEstLoss_ckpt/sensor_weight_300.pth'
-	sensor_vae = Sensor_VAE(algo_args, config).to(device)
-	sensor_vae.load_state_dict(torch.load(pas_ckpt_dir))
+	# label_ckpt_dir = 'data/entering_room_data/label_vae_ckpt/label_weight_40.pth'
+	# label_vae = Label_VAE(algo_args).to(device)
+	# label_vae.load_state_dict(torch.load(label_ckpt_dir))
+	# pas_ckpt_dir = 'data/entering_room_data/sensor_vae_woEstLoss_ckpt/sensor_weight_40.pth'
+	# sensor_vae = Sensor_VAE(algo_args, config).to(device)
+	# sensor_vae.load_state_dict(torch.load(pas_ckpt_dir))
+	label_vae = None
+	sensor_vae = None
  
 	mppi_module = MPPI_Planner(config, algo_args, device)
  

@@ -15,6 +15,32 @@ def average(input_list):
     else:
         return 0
     
+def plot_ego_states(dt, trajectories, save_dir, k):
+    import matplotlib.pyplot as plt
+    import matplotlib.animation as animation
+    from matplotlib.patches import Circle
+    
+    save_dir =  os.path.join(save_dir, 'val_render')
+
+    # plot robot's x, y, theta, v in each plot
+    fig, axes = plt.subplots(len(trajectories[0]))
+    fig.suptitle('Robot trajectory')
+    fig.tight_layout()
+    labels = ['x', 'y','theta','v']
+    trajectories = np.stack(trajectories)
+    for i, data in enumerate(zip(labels, trajectories.T)):
+        label, trajectory = data
+        x_linspace = np.linspace(0,len(trajectory)*dt, len(trajectory))
+        axes[i].plot(x_linspace, trajectory)
+        axes[i].set_title(label)
+        
+    os.makedirs(save_dir) if not os.path.exists(save_dir) else None
+    save_path = os.path.join(save_dir, f'ego_states_epi_{k}.png')
+    plt.savefig(save_path)
+    plt.close()
+    
+    
+    
 
 def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, eval_envs, device, test_size, logging, visualize=False,
              phase=None, j=None):
@@ -40,6 +66,7 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
     gamma = 0.99
     baseEnv = eval_envs.venv.envs[0].env    
     
+    
     # total_similarity = []
     # total_occupied_similarity = []
     # total_free_similarity = []
@@ -58,9 +85,10 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
         stepCounter = 0
         episode_rew = 0
         all_videoGrids = []
+        trajectories = []
         print('Episode', k, '/ Disambig_flag:', config.reward.disambig_reward_flag)
         obs = eval_envs.reset()
-            
+        
         if rollouts is not None:
             rollouts.reset()
             if isinstance(obs, dict):
@@ -90,16 +118,19 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
             with torch.no_grad():
                 if rollouts is not None:
                     masks = rollouts.masks[stepCounter]               
-
                
-                _, _, z= sensor_vae(obs['grid'])
-                decoded = label_vae.decoder(z) # (1,1,100,100)
-                                
-                # decoded = obs['label_grid'].clone()
+                # _, _, z= sensor_vae(obs['grid'])
+                # decoded = label_vae.decoder(z) # (1,1,100,100)
+                                                
+                ### Using the ground truth occupancy of all human agents.
+                decoded = obs['label_grid'][:,[0]].clone()
+                # ignore the walls
+                decoded = torch.where(obs['label_grid'][:,[1]]==-9999., torch.tensor(0.0), decoded)
+                
                 # To test the disambiguation, manually place a estimation in the decoded grid in the unknown area. 30 degree from the robot's heading
                 # decoded[0,0,80:90,80:90] = 1.0
                 
-                action, disambig_R_map = mppi_module.plan(obs, decoded, config)
+                action, disambig_R_map = mppi_module.plan(obs, decoded, baseEnv.wall_polygons, config)
                 # Use the observation grid for disambiguation. Set only the unknown area to be 1.
                 # obs_unknown_mask = torch.where(obs['grid'][:,-1]==0.5, torch.tensor(1.0), torch.tensor(0.0))
                 # action, disambig_R_map = mppi_module.plan(obs, obs_unknown_mask, config)
@@ -111,10 +142,12 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                 global_time = baseEnv.global_time
                 
             if visualize: # and (k==59 or k==85):
-                # all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
-                decoded_only_unknown = torch.where(obs['grid'][:,-1]==0.5, decoded[:,0], torch.tensor(0.0))
+                # all_videoGrids.append(obs['label_grid'][:,0].cpu().numpy())
+                all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
+                trajectories.append(obs['mppi_vector'][0, config.pas.sequence-1, 0, :4].cpu().numpy())
+                # decoded_only_unknown = torch.where(obs['grid'][:,-1]==0.5, decoded[:,0], torch.tensor(0.0))
                 # all_videoGrids.append(decoded_only_unknown.cpu().numpy())
-                all_videoGrids.append(disambig_R_map.cpu().numpy()[[0]])
+                # all_videoGrids.append(disambig_R_map.cpu().numpy()[[0]])
                 # all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
                 # if config.robot.policy == 'pas_rnn':
                 #     # if config.pas.encoder_type == 'vae' and config.pas.gridsensor == 'sensor':
@@ -124,10 +157,9 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                         
                 # else:
                 #     all_videoGrids = torch.Tensor([99.])
-                
-                         
 
             obs, rew, done, infos = eval_envs.step(action)
+            
             # pdb.set_trace()
             # print(time.time()-start_time) # takes 1.8~1.9s for each step with disambiguation
             # start_time = time.time()   
@@ -175,11 +207,20 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                     eval_episode_rewards.append(info['episode']['r'])                    
             
             if done and visualize and (k <10 or isinstance(infos[0]['info'], Collision)): # and (k==59 or k==85):        
-            # if done and visualize and  isinstance(infos[0]['info'], Collision): # and (k==59 or k==85):        
-                action, disambig_R_map = mppi_module.plan(obs, decoded, config)
-                # all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
-                decoded_only_unknown = torch.where(obs['grid'][:,-1]==0.5, decoded[:,0], torch.tensor(0.0))
-                all_videoGrids.append(disambig_R_map.cpu().numpy()[[0]])
+            # if done and visualize and  isinstance(infos[0]['info'], Collision): # and (k==59 or k==85):  
+                trajectories.append(obs['mppi_vector'][0, config.pas.sequence-1, 0, :4].cpu().numpy())  # robot px, py, theta, v
+                plot_ego_states(config.env.time_step, trajectories, model_dir, k)
+                
+                ### Using the ground truth occupancy of all human agents.
+                decoded = obs['label_grid'][:,[0]].clone()
+                # ignore the walls
+                decoded = torch.where(obs['label_grid'][:,[1]]==-9999., torch.tensor(0.0), decoded)                
+                      
+                action, disambig_R_map = mppi_module.plan(obs, decoded, baseEnv.wall_polygons, config)
+                # all_videoGrids.append(obs['label_grid'][:,0].cpu().numpy())
+                all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())
+                # decoded_only_unknown = torch.where(obs['grid'][:,-1]==0.5, decoded[:,0], torch.tensor(0.0))
+                # all_videoGrids.append(disambig_R_map.cpu().numpy()[[0]])
                 # all_videoGrids.append(decoded_only_unknown.cpu().numpy())
                 
                 video_dir = model_dir+"/"+phase+"_render/"

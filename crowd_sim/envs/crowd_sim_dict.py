@@ -47,21 +47,22 @@ class CrowdSimDict(CrowdSim):
         if self.collectingdata:   
             robot_vec_length = 9
         else:
-            if self.config.action_space.kinematics=="holonomic":
-                robot_vec_length = 4
-            else:
-                robot_vec_length = 5
+            # if self.config.action_space.kinematics=="holonomic":
+            robot_vec_length = 4
+            # else:
+            #     robot_vec_length = 5
         d={}         
-        if self.collectingdata:    
+        if self.collectingdata: 
             vec_length = robot_vec_length+5*self.human_num
-            d['vector'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, vec_length,), dtype = np.float32)                    
-            d['label_grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2, *self.grid_shape), dtype = np.float32) 
-            d['sensor_grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, *self.grid_shape), dtype = np.float32) 
-            
-        else:
-            if self.config.robot.policy =='pas_rnn' or self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+            d['vector'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, vec_length,), dtype = np.float32)       
+            if self.config.robot.policy == 'orca':     
+                d['label_grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2, *self.grid_shape), dtype = np.float32) 
+                d['sensor_grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, *self.grid_shape), dtype = np.float32) 
+        elif self.config.robot.policy =='pas_rnn' or self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
                 d['vector'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, robot_vec_length,), dtype = np.float32)  
-            if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+                
+        if (self.collectingdata and 'mppi' in self.config.robot.policy) or not self.collectingdata:
+            if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
                 full_sequence = self.config.pas.sequence + self.config.diffstack.lookahead_steps
                 d['mppi_vector'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(full_sequence, 1+self.human_num, 7), dtype = np.float32)
             ## TODO: make the grid shape to sequence + future once the fast ray tracing is implemented              
@@ -74,7 +75,7 @@ class CrowdSimDict(CrowdSim):
             d['grid_xy'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2, *self.grid_shape), dtype = np.float32)
         self.observation_space=gym.spaces.Dict(d)
 
-        if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+        if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
             high = np.inf * np.ones([1*(self.config.diffstack.lookahead_steps+1)*4, ])
             ## Uncomment for the "fan" planner
             # high = np.inf * np.ones([700*(self.config.diffstack.lookahead_steps+1)*4, ])
@@ -111,11 +112,11 @@ class CrowdSimDict(CrowdSim):
         self.dict_update()
         ego_dict, other_dict = self.ego_other_dict(ego_id)
         
-        label_grid, x_map, y_map = generateLabelGrid(ego_dict, other_dict, res=self.grid_res)
+        label_grid, x_map, y_map = generateLabelGrid(ego_dict, other_dict, self.wall_polygons, res=self.grid_res)
         map_xy = [x_map, y_map]
 
         if self.gridsensor == 'sensor' or self.collectingdata:
-            visible_id, sensor_grid = generateSensorGrid(label_grid, ego_dict, other_dict, map_xy, self.FOV_radius, res=self.grid_res)
+            visible_id, sensor_grid = generateSensorGrid(label_grid, ego_dict, other_dict, self.wall_polygons, map_xy, self.FOV_radius, res=self.grid_res)
             self.visible_ids.append(visible_id)
         else:
             visible_id = np.unique(label_grid[1])[:-1]
@@ -142,7 +143,7 @@ class CrowdSimDict(CrowdSim):
         
         ## Update all agents for a lookahead step, but don't update the global states
         # TODO: Create sensor grid for the next step
-        # if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+        # if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
         # copy robot and human agents
         robot_copy = self.copy_robot(self.robot)
         humans_copy = []
@@ -155,26 +156,28 @@ class CrowdSimDict(CrowdSim):
         self.lookahead_list.append(lookahead_states)
            
         #####################################
-        # if self.config.robot.policy =='pas_rnn' or self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+        # if self.config.robot.policy =='pas_rnn' or self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
         if self.config.pas.gridtype == 'global' or self.collectingdata:
             ob['vector'] = self.robot.get_full_state_list()
         elif self.config.pas.gridtype == 'local':
             # self.px, self.py, self.vx, self.vy, self.radius, self.gx, self.gy, self.v_pref, self.theta
             robot_state_np = np.array(self.robot.get_full_state_list()).copy()
-            if self.robot.kinematics == 'holonomic':               
-                robot_vector = np.zeros(4)
-                robot_vector[:2] = robot_state_np[:2]-robot_state_np[5:7]
-                robot_vector[2:4] = robot_state_np[2:4]
-                ob['vector'] = robot_vector  # (px-gx, py-gy, vx, vy)     
-            else: 
-                robot_vector = np.zeros(5) 
-                robot_vector[:5] = robot_state_np[:5]
-                robot_vector[:2] = deepcopy(robot_state_np[:2]-robot_state_np[5:7])
-                robot_vector[2] = robot_state_np[-1]                    
-                ob['vector'] = robot_vector # unicycle # (px-gx, py-gy, theta, v, w)
+            # if self.robot.kinematics == 'holonomic':               
+            robot_vector = np.zeros(4)
+            robot_vector[:2] = robot_state_np[:2]-robot_state_np[5:7]
+            robot_vector[2:4] = robot_state_np[2:4]
+            ob['vector'] = robot_vector  # (px-gx, py-gy, vx, vy)     
+            # else: 
+            #     robot_vector = np.zeros(5) 
+            #     robot_vector[:5] = robot_state_np[:5]
+            #     robot_vector[:2] = deepcopy(robot_state_np[:2]-robot_state_np[5:7])
+            #     robot_vector[-1] = robot_state_np[-1]                    
+            #     ob['vector'] = robot_vector # unicycle # (px-gx, py-gy, vx, vy, w) -> Still converged to vx, vy from theta, v
+                
+        if 'mppi' in self.config.robot.policy:
             ob['mppi_vector'] = np.array(self.states_list[-self.config.pas.sequence:] + lookahead_states) # (sequence+lookahead_steps,1+n_humans, 7) )
             # print(ob['mppi_vector'][:, :, :2])
-        # if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+        # if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
         #     # ob['vector'] should have past sequence length from self.states and future sequence length from the lookahead step
         #     # stack per agent
         #     # print(np.array(self.states_list[-self.config.pas.sequence:]).shape, np.array(lookahead_states).shape, np.array(self.states[-self.config.pas.sequence:] + lookahead_states).shape)            
@@ -202,30 +205,31 @@ class CrowdSimDict(CrowdSim):
         
         # For collecting data
         if self.collectingdata:
-            # When robot is executed by ORCA
-            for i, human in enumerate(self.humans):                    
-                # observation for robot. Don't include robot's state
-                self.ob = [] 
-                for other_human in self.humans:
-                    if other_human != human:
-                        # Chance for one human to be blind to some other humans
-                        if self.random_unobservability and i == 0:
-                            if np.random.random() <= self.unobservable_chance or not self.detect_visible(human,
-                                                                                                        other_human):
-                                self.ob.append(self.dummy_human.get_observable_state())
-                            else:
-                                self.ob.append(other_human.get_observable_state())
-                        # Else detectable humans are always observable to each other
-                        elif self.detect_visible(human, other_human):
-                            self.ob.append(other_human.get_observable_state())
-                        else:
-                            self.ob.append(self.dummy_human.get_observable_state())
             # TODO: !! human visibility should be True for all humans to use the gt positions. But not a big deal since it was only used for sanity check.
-            ob['vector'].extend(list(np.ravel(self.last_human_states))) # add human states to vector
-            ob['grid_xy'] = map_xy
-            ob['label_grid'] = label_grid # both the label grid and id grid
-            ob['sensor_grid'] = sensor_grid              
-        else:    
+            if self.config.robot.policy=='orca':
+                # When robot is executed by ORCA
+                for i, human in enumerate(self.humans):                    
+                    # observation for robot. Don't include robot's state
+                    self.ob = [] 
+                    for other_human in self.humans:
+                        if other_human != human:
+                            # Chance for one human to be blind to some other humans
+                            if self.random_unobservability and i == 0:
+                                if np.random.random() <= self.unobservable_chance or not self.detect_visible(human,
+                                                                                                            other_human):
+                                    self.ob.append(self.dummy_human.get_observable_state())
+                                else:
+                                    self.ob.append(other_human.get_observable_state())
+                            # Else detectable humans are always observable to each other
+                            elif self.detect_visible(human, other_human):
+                                self.ob.append(other_human.get_observable_state())
+                            else:
+                                self.ob.append(self.dummy_human.get_observable_state())
+                ob['grid_xy'] = map_xy
+                ob['label_grid'] = label_grid # both the label grid and id grid
+                ob['sensor_grid'] = sensor_grid         
+            ob['vector'].extend(list(np.ravel(self.last_human_states))) # add human states to vector     
+        if self.config.robot.policy!='orca':
             if self.gridsensor == 'sensor':
                 if self.config.pas.encoder_type != 'cnn' :
                     self.sequence_grid.append(sensor_grid)
@@ -240,6 +244,8 @@ class CrowdSimDict(CrowdSim):
                     cur_vis_grids = np.ones(self.human_num) * -1
                     if len(visible_id) > 0:
                         for h_id in visible_id:
+                            if h_id == -9999: # TODO: check if building id needs to be included.
+                                continue
                             cur_vis_grids[int(h_id)] = h_id
                     self.vis_ids.append(cur_vis_grids)
                     if len(self.vis_ids) < self.config.pas.sequence:
@@ -388,7 +394,7 @@ class CrowdSimDict(CrowdSim):
         self.traj_candidates = list()
         self.desiredVelocity = [0.0, 0.0]
         self.humans = []
-        # train, val, and test phase should start with different seed.
+        # train, val, and test phase should start with different enter.
         # case capacity: the maximum number for train(max possible int -2000), val(1000), and test(1000)
         # val start from seed=0, test start from seed=case_capacity['val']=1000
         # train start from self.case_capacity['val'] + self.case_capacity['test']=2000
@@ -411,7 +417,7 @@ class CrowdSimDict(CrowdSim):
 
         # get robot observation
         ob = self.generate_ob(reset=True)
-        if self.robot.kinematics == 'unicycle' and (self.config.robot.policy != 'pas_diffstack' or self.config.robot.policy != 'pas_mppi'):  # when 'pas_diffstack', action is returend as a part of the observation
+        if self.robot.kinematics == 'unicycle' and (self.config.robot.policy!='pas_diffstack' and self.config.robot.policy!='pas_mppi'):  # when 'pas_diffstack', action is returend as a part of the observation
             ob['vector'][3:5] =  np.array([0,0]) # TODO: needs to be updated to actual initial velocity
             
         # initialize current sensor grid and map_xy for disambiguation reward
@@ -647,7 +653,7 @@ class CrowdSimDict(CrowdSim):
             with torch.no_grad():
                 action = self.robot.act(self.ob)  
         else:
-            if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+            if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
                 # # action=ActionRot(action[0], action[1])
                 # [20*(self.config.diffstack.lookahead_steps+1)*4, ]
                 # action_raw: (1, 1+human_num, 1+lookahead_steps, 4) 
@@ -676,7 +682,7 @@ class CrowdSimDict(CrowdSim):
         
         
         # apply action and update all agents
-        if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+        if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
             # action_raw: (1+human_num, 1+lookahead_steps, 4)
             # manually set the robot position and velocity
             if self.robot.kinematics == 'holonomic':
@@ -789,6 +795,7 @@ class CrowdSimDict(CrowdSim):
         if mode is None: # to pass all_videoGrids to render_traj()
             pass
         elif mode == 'human':
+            # TODO: Need to add wall obstacles
             def calcFOVLineEndPoint(ang, point, extendFactor):
                 # choose the extendFactor big enough
                 # so that the endPoints of the FOVLine is out of xlim and ylim of the figure
@@ -931,7 +938,7 @@ class CrowdSimDict(CrowdSim):
 
             robot = plt.Circle(robot_positions[0], self.robot.radius, fill=True, color=robot_color)
             
-            if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+            if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
                 ## add robot planned trajectory
                 # Append the last state to the end of the list to make the length of the list equal to the length of the states list
                 self.traj_candidates.append(self.traj_candidates[-1]) # human trajectories
@@ -960,6 +967,19 @@ class CrowdSimDict(CrowdSim):
                         
             ax.add_artist(robot)
             ax.add_artist(goal)
+            
+            
+            if len(self.wall_polygons) > 0:
+                for wall in self.wall_polygons:
+                    x_min = np.min(wall[:,0])
+                    y_min = np.min(wall[:,1])
+                    x_max = np.max(wall[:,0])
+                    y_max = np.max(wall[:,1])
+                    width = x_max - x_min
+                    height = y_max - y_min
+                    
+                    wall_rec = plt.Rectangle((x_min, y_min), width, height, fill=False, color='grey', linestyle='--')
+                    ax.add_artist(wall_rec)
             
             # # Add 120  degree line of field of view for the robot
             # FOV_angle = math.pi/3*2
@@ -995,7 +1015,7 @@ class CrowdSimDict(CrowdSim):
                 # # ax.add_artist(FOV)
                 # plt.legend([robot, goal, goal2], ['Robot', 'Goal', 'Goal2'], fontsize=16, loc='upper left')
                 plt.legend([robot, goal], ['Robot', 'Goal'], fontsize=16, loc='upper left')
-                print('robot goal', self.robot.gx, self.robot.gy)
+                # print('robot goal', self.robot.gx, self.robot.gy)
             else:
                 plt.legend([robot, goal], ['Robot', 'Goal'], fontsize=16, loc='upper left')
 
@@ -1096,7 +1116,7 @@ class CrowdSimDict(CrowdSim):
                 FOVLine2.set_xdata([robot_positions[frame_num][0], x2])
                 FOVLine2.set_ydata([robot_positions[frame_num][1], y2])
                 
-                if self.config.robot.policy == 'pas_diffstack' or self.config.robot.policy == 'pas_mppi':
+                if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
                     robot_trajs = self.planned_traj[frame_num][:,:2]
                     robot_trajs_candidates = self.traj_candidates[frame_num][:,:,:2].reshape(-1,2)
                     # FOV.center = robot_positions[frame_num]

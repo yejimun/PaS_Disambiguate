@@ -7,7 +7,7 @@ warnings.filterwarnings("ignore")
 
 
 @jit
-def generateLabelGrid(ego_dict, sensor_dict, res=0.1):  
+def generateLabelGrid(ego_dict, sensor_dict, wall_polygons, res=0.1):  
 
     minx = ego_dict['pos'][0] - 5. + res/2.
     miny = ego_dict['pos'][1] - 5. + res/2. 
@@ -27,9 +27,14 @@ def generateLabelGrid(ego_dict, sensor_dict, res=0.1):
 
     for s_id, pos, radius in zip(sensor_dict['id'], sensor_dict['pos'], sensor_dict['r']):
         mask = point_in_circle(x_local, y_local, pos, radius, res)
-
         # occupied by sensor
         label_grid[0,mask] = 1. 
         label_grid[1,mask] = int(s_id) # does not include ego id
+        
+    # Occupancy of walls
+    for wall_polygon in wall_polygons:
+        mask = point_in_rectangle(x_local, y_local, wall_polygon)
+        label_grid[0,mask] = 1. 
+        label_grid[1,mask] = -9999. # building id
 
     return label_grid, x_local, y_local

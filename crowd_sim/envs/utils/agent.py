@@ -186,13 +186,19 @@ class Agent(object):
             # differential drive
             epsilon = 0.0001
             if abs(action.r) < epsilon:
-                R = 0
+                #### TODO: For turtlebot experiment I think. Pure rotation. Then, uncomment the below two lines for px, py.
+                # R = 0 
+                # px = self.px - R * np.sin(self.theta) + R * np.sin(self.theta + action.r)
+                # py = self.py + R * np.cos(self.theta) - R * np.cos(self.theta + action.r)
+                ##########################
+                px = self.px + action.v * delta_t * np.cos(self.theta)
+                py = self.py + action.v * delta_t * np.sin(self.theta)
             else:
                 w = action.r/delta_t # action.r is delta theta
                 R = action.v/w
 
-            px = self.px - R * np.sin(self.theta) + R * np.sin(self.theta + action.r)
-            py = self.py + R * np.cos(self.theta) - R * np.cos(self.theta + action.r)
+                px = self.px - R * np.sin(self.theta) + R * np.sin(self.theta + action.r)
+                py = self.py + R * np.cos(self.theta) - R * np.cos(self.theta + action.r)
 
 
         return px, py
@@ -212,7 +218,8 @@ class Agent(object):
             self.vy = action.vy            
             self.theta = np.arctan2(self.vy, self.vx)
         else:
-            self.theta = (self.theta + action.r) % (2 * np.pi)
+            self.theta = (self.theta + action.r) % (2 * np.pi) # action.r: angular change, not angular velocity (w).
+            # Using updated theta just for visualization purpose. 
             self.vx = action.v * np.cos(self.theta)
             self.vy = action.v * np.sin(self.theta)
 

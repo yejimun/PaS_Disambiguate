@@ -23,6 +23,7 @@ class CrowdSim(gym.Env):
         self.humans = None # a list of Human instances, representing all humans in the environment
         self.global_time = None
         self.n_loop = None
+        self.wall_polygons = []
 
         # reward function
         self.success_reward = None
@@ -202,13 +203,76 @@ class CrowdSim(gym.Env):
         while len(self.humans) < human_num:
             if self.sim == "circle_crossing":   
                 self.humans.append(self.generate_circle_crossing_human())
-            elif self.sim == 'static_obstacles':
+            elif self.sim == "static_obstacles":
                 if len(self.humans) < 5:
                     self.humans.append(self.generate_static_obstacle(len(self.humans)))
                 else:
                     self.humans.append(self.generate_circle_crossing_human(self.robot.get_goal_position()))
+            elif self.sim == "entering_room":
+                occluded_from_left = np.random.random() > 0.5
+                self.humans.append(self.generate_entering_room_human(len(self.humans), occluded_from_left))
+            elif self.sim == "static_human_behindWall":
+                occluded_from_left = np.random.random() > 0.5
+                self.humans.append(self.generate_staticHuman_behindWall(len(self.humans), occluded_from_left))
+                ### !! The order of wall vertices matters! Right thumb rule starting from the most top right.
+                if occluded_from_left:
+                    # 2-1     
+                    # 3-4
+                    self.wall_polygons = [np.array([[-0.5, 0.2], [-6, 0.2],[-6, -0.2], [-0.5, -0.2]])]        
+                else:
+                    self.wall_polygons = [np.array([[6., 0.2], [0.5, 0.2], [0.5, -0.2], [6., -0.2]])]    
             else:
                 raise NotImplementedError
+            
+    def generate_entering_room_human(self, human_id, occluded_from_left=False):
+        human = Human(self.config, 'humans', 'orca')
+        
+        if human_id <1: # reference humans
+            px = 0. #(-1)**human_id*1.5
+            py = (-3.5 + np.random.random()*0.2)
+            gx = 0.0
+            gy = 7.0
+            human.set(px, py, gx, gy, 0, 0, 0, v_pref=self.config.humans.v_pref)
+            # print('human0 initial px,py:', px, py)
+        elif human_id >=1 and human_id < 2: # occluded humans
+            if occluded_from_left:
+                px = -(5. + (-1.)**np.random.choice([0,1])*np.random.random()*0.2) #if human_id == 1. else -(7. + np.random.random()*0.2)
+            else:
+                px = 5.+(-1.)**np.random.choice([0,1])*np.random.random()*0.2  #if human_id == 1. else (7.+np.random.random()*0.2)
+            py = 1.2 + (human_id-1) * 2.
+            v_pref = self.config.humans.v_pref if np.random.random() < 0.5 else 0
+            human.set(px, py, -px, py, 0, 0, 0,v_pref=v_pref)
+            # print('human1 initial px,py:', px,py)
+            
+        elif human_id>=2 and human_id<6 : # left static humans
+            h_radius = 0.5
+            px = -6 + (human_id-2)*h_radius*2 + h_radius
+            py = 0.0
+            human.set(px, py, px, py, 0, 0, 0, radius=h_radius,v_pref=0)
+            
+        elif human_id >=6 and human_id < 10: # right static humans
+            h_radius = 0.5
+            px = 2. + (human_id-6)*h_radius*2 + h_radius
+            py = 0.0
+            human.set(px, py, px, py, 0, 0, 0, radius=h_radius,v_pref=0)
+
+        return human
+    
+    def generate_staticHuman_behindWall(self, human_id, occluded_from_left=False):
+        human = Human(self.config, 'humans', 'orca')
+        
+        if occluded_from_left:
+            px = -1.5
+        else:
+            px = 1.5
+        py = 0.5
+        gx = px
+        gy = py
+        human.set(px, py, gx, gy, 0, 0, 0, v_pref=self.config.humans.v_pref)
+        # print('human0 initial px,py:', px, py)
+
+        return human
+        
     
 
     # return a static human in env
@@ -386,11 +450,14 @@ class CrowdSim(gym.Env):
             elif self.sim == 'static_obstacles':
                 px, py = 2.0, -4.0
                 gx, gy = 0.0, -py
+            elif self.sim == 'entering_room' or self.sim == 'static_human_behindWall':
+                px, py = 0.0, -5.0
+                gx, gy = 0.0, 5.0
             if np.linalg.norm([px - gx, py - gy]) >= 4: #8:
                 break
         vx = np.random.uniform(-self.config.robot.v_pref, self.config.robot.v_pref)/2.
         vy = np.random.uniform(-self.config.robot.v_pref, self.config.robot.v_pref)/2.
-        self.robot.set(px, py, gx, gy, vx, vy, 0.)
+        self.robot.set(px, py, gx, gy, vx, vy, np.pi/2.)
 
         # generate humans
         self.generate_random_human_position(human_num=human_num)
@@ -539,8 +606,15 @@ class CrowdSim(gym.Env):
             human.gx = -human.gx
             human.gy = -human.gy
                 
+        elif self.sim == 'entering_room':
+            # Not updating the goal
+            if i in [0]: # reference humans
+                human.gy = human.gy
+            elif i in [1]: # occluded humans
+                human.gx = human.gx            
         else:
-            raise NotImplementedError
+            pass
+            # raise NotImplementedError
 
         return
 
@@ -812,9 +886,9 @@ class CrowdSim(gym.Env):
             info=episode_info
 
         if self.end_goal_changing:
-            for human in self.humans:
+            for i, human in enumerate(self.humans):
                 if not human.isObstacle and human.v_pref != 0 and norm((human.gx - human.px, human.gy - human.py)) < human.radius:
-                    self.update_human_goal(human)
+                    self.update_human_goal(human, i)
 
         return ob, reward, done, info
 

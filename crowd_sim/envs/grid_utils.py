@@ -1,10 +1,13 @@
 import numpy as np
 from scipy import *
 import copy
+import torch
+from scipy.spatial import cKDTree
 from numba import jit, njit
+from shapely.geometry import Point, LineString
 import random
 import numba
-from mppi.utils import *
+# from mppi.utils import *
 import pdb
 
 
@@ -71,7 +74,7 @@ def transfer_grid_data(curr_xy, curr_grids, next_xy, next_grids, distance_thresh
     return updated_grids
 
 
-def Transfer_to_EgoGrid(curr_xy, curr_grids, next_xy, next_grids, res):
+def Transfer_to_EgoGrid(curr_xy, curr_grids, next_xy, next_grids):
     # global x_min, x_max, y_min, y_max
     ###############################################################################################################################
     ## Goal : Transfer pred_maps (in sensor/reference car's grid) cell information to the unknown cells of ego car's sensor_grid
@@ -100,9 +103,6 @@ def Transfer_to_EgoGrid(curr_xy, curr_grids, next_xy, next_grids, res):
     updated_next_grids = transfer_grid_data(curr_xy, curr_grids_, next_xy, next_grids ,distance_threshold=global_res)
 
     return updated_next_grids
-
-
-
 
 # IS metric.
 def MapSimilarityMetric(pas_map, sensor_grid, label_grid):    
@@ -347,11 +347,11 @@ def parallelpointinpolygon(points, polygon):
 
 
 def point_in_rectangle(x, y, rectangle):
-    A = rectangle[0]
-    B = rectangle[1]
-    C = rectangle[2]
+    A = np.array(rectangle[0])
+    B = np.array(rectangle[1])
+    C = np.array(rectangle[2])
 
-    M = np.array([x,y]).transpose((1,2,0))
+    M = np.array([x,y]).transpose((1,2,0)) # (100,100,2)
 
     AB = B-A
     AM = M-A # nxnx2
@@ -434,3 +434,73 @@ def is_close(a,b,c,d,point,distance=0.1):
     D = (a*point[:,0]+b*point[:,1]+c*point[:,2]+d)/np.sqrt(a**2+b**2+c**2)
     return D
 
+
+############ For polygon ray tracing ##########################
+def unit_vector(vector):
+    """ Returns the unit vector of the vector.  """
+    return vector / np.linalg.norm(vector)
+
+def angle_between(v1, v2):
+    """ Returns the angle in radians between vectors 'v1' and 'v2'::
+
+            >>> angle_between((1, 0, 0), (0, 1, 0))
+            1.5707963267948966
+            >>> angle_between((1, 0, 0), (1, 0, 0))
+            0.0
+            >>> angle_between((1, 0, 0), (-1, 0, 0))
+            3.141592653589793
+    """        
+
+    v1_u = unit_vector(v1)
+    v2_u = unit_vector(v2)
+    # If angles between two vectors are bigger than or equal to 180 degree
+    # if np.cross(v1_u, v2_u)<0 or (np.cross(v1_u, v2_u)==0 and np.dot(v1_u, v2_u)<0) :
+    #     print("here")
+    #     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)) + np.pi
+    # else:
+    #     print("else")
+    angle = np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)
+    if angle == -1.0:
+        return -np.pi
+    elif angle == 1.0:
+        return np.pi
+    else:
+        return np.arccos(angle)
+
+def clip_polygon_to_grid(poly_verts, grid_polygon):
+    """
+    Given poly_verts (an ordered list of [x, y] points)
+    and a grid_polygon (a Shapely Polygon), return new vertices
+    for the polygon clipped to the grid.
+    """
+    new_poly = []
+    n = len(poly_verts)
+    for i in range(n):
+        p1 = Point(poly_verts[i])
+        p2 = Point(poly_verts[(i + 1) % n])
+        edge = LineString([poly_verts[i], poly_verts[(i + 1) % n]])
+
+        # If p1 is inside, keep it.
+        if grid_polygon.contains(p1):
+            new_poly.append(poly_verts[i])
+        else:
+            # For vertices outside, we may add the intersection if the edge crosses the grid.
+            # (We don't add p1 because it lies outside.)
+            pass
+
+        # Check if the edge between p1 and p2 intersects the grid boundary.
+        intersection = edge.intersection(grid_polygon.boundary)
+        if not intersection.is_empty:
+            # The intersection can be a single point or multiple points.
+            if intersection.geom_type == 'Point':
+                inter_pt = [intersection.x, intersection.y]
+                # Only add if it's not already the last point.
+                if not new_poly or np.any(new_poly[-1] != inter_pt):
+                    new_poly.append(inter_pt)
+            elif intersection.geom_type == 'MultiPoint':
+                for pt in intersection:
+                    inter_pt = [pt.x, pt.y]
+                    if not new_poly or np.any(new_poly[-1] != inter_pt):
+                        new_poly.append(inter_pt)
+
+    return new_poly
