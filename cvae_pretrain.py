@@ -14,7 +14,7 @@ from arguments import get_args
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from rl.pas_rnn_model import Label_VAE, Sensor_VAE
+from rl.pas_cvae_model import Label_VAE, Sensor_VAE
 from crowd_nav.configs.config import Config
 from crowd_sim.envs.grid_utils import MapSimilarityMetric
 import pdb
@@ -23,16 +23,12 @@ import pdb
 # 1. (Optional) Train Sensor VAE for estimating only the unknown area
 
 
-# 5/5 TODO
-# Remove walls during data processing
-
-
 def make_sequence(data_path, phase, sequence=1):    
-    label_grid_files = sorted(glob.glob(data_path+'*label_grid.npy'))
-    sensor_grid_files = sorted(glob.glob(data_path+'*sensor_grid.npy'))
-    id_grid_files = sorted(glob.glob(data_path+'*id_grid.npy'))
+    vector_files = sorted(glob.glob(data_path+'*vector.npy'))[:10]
+    label_grid_files = sorted(glob.glob(data_path+'*label_grid.npy'))[:10]
+    sensor_grid_files = sorted(glob.glob(data_path+'*sensor_grid.npy'))[:10]
     if phase !='train':
-        vector_files = sorted(glob.glob(data_path+'*vector.npy'))
+        id_grid_files = sorted(glob.glob(data_path+'*id_grid.npy'))[:10]
 
     vector = []
     label_grid = []
@@ -42,49 +38,48 @@ def make_sequence(data_path, phase, sequence=1):
         if phase != 'train':
             v_f, lg_f, sg_f, id_f = vector_files[i], label_grid_files[i], sensor_grid_files[i], id_grid_files[i] 
         else:
-            lg_f, sg_f, id_f = label_grid_files[i], sensor_grid_files[i], id_grid_files[i] 
-        
+            v_f, lg_f, sg_f = vector_files[i], label_grid_files[i], sensor_grid_files[i]
+        epi_vector = np.load(v_f, mmap_mode='r')
         epi_label_grid = np.load(lg_f, mmap_mode='r')
         epi_sensor_grid = np.load(sg_f, mmap_mode='r')
-        epi_id_grid = np.load(id_f, mmap_mode='r')
         if phase != 'train':
-            epi_vector = np.load(v_f, mmap_mode='r')
+            epi_id_grid = np.load(id_f, mmap_mode='r')
         timestamp = 0
         for k in range(len(epi_label_grid)):   
             if phase == 'train':  
-                lg, sg, ig  = epi_label_grid[k], epi_sensor_grid[k], epi_id_grid[k]
+                v, lg, sg = epi_vector[k], epi_label_grid[k], epi_sensor_grid[k]
             else:
                 v, lg,sg, ig = epi_vector[k], epi_label_grid[k], epi_sensor_grid[k], epi_id_grid[k]
+                
             if timestamp == 0.:
+                v = v
                 lg = lg # (100, 100)
                 sg = sg
-                ig = ig
                 if phase != 'train':
-                    v = v
-
+                    ig = ig
+                    
+                vec = deque(maxlen=sequence)
                 labelG = deque(maxlen=1)
                 sensorG = deque(maxlen=sequence)
-                idG = deque(maxlen=1)
                 if phase != 'train':
-                    vec = deque(maxlen=sequence)
+                    idG = deque(maxlen=1)
 
                 sensorG.extend(np.vstack([sg for i in range(sequence)]))
-                if phase != 'train':
-                    vec.extend(np.vstack([v for i in range(sequence)])) 
+                vec.extend(np.vstack([v for i in range(sequence)])) 
 
             else:
                 sensorG.extend(sg)
-                if phase != 'train':
-                    vec.extend(v)
+                vec.extend(v)
             
             labelG.extend(lg)
-            idG.extend(ig)
+            if phase != 'train':
+                idG.extend(ig)
             
+            vector.append(np.array(vec, dtype=np.float32).copy())
             label_grid.append(np.array(labelG, dtype=np.float32).copy())
             sensor_grid.append(np.array(sensorG, dtype=np.float32).copy())
-            id_grid.append(np.array(idG, dtype=np.float32).copy())
             if phase != 'train':
-                vector.append(np.array(vec, dtype=np.float32).copy())
+                id_grid.append(np.array(idG, dtype=np.float32).copy())
             
             timestamp+=1
             
@@ -92,7 +87,7 @@ def make_sequence(data_path, phase, sequence=1):
             print(i, 'file sequence has been made.')
             
     if phase == 'train':
-        return label_grid, sensor_grid, id_grid
+        return vector, label_grid, sensor_grid
     else:        
         return vector, label_grid, sensor_grid, id_grid 
 
@@ -101,11 +96,11 @@ def make_sequence(data_path, phase, sequence=1):
 
 class DATA(Dataset):
     def __init__(self,logging, phase, sequence=1):
-        data_path = 'entering_room_data/'+phase +'/' 
+        data_path = 'entering_room/'+phase +'/' 
         self.phase = phase
 
         if phase =='train':
-            self.label_grid, self.sensor_grid, self.id_grid = make_sequence(data_path, phase, sequence=sequence)
+            self.vector, self.label_grid, self.sensor_grid = make_sequence(data_path, phase, sequence=sequence)
         else:
             self.vector, self.label_grid, self.sensor_grid, self.id_grid = make_sequence(data_path, phase, sequence=sequence)
         logging.info('Phase : {}, sequential data : {:d}'. format(phase, len(self.label_grid)))   
@@ -114,16 +109,14 @@ class DATA(Dataset):
         return len(self.label_grid)
 
     def __getitem__(self, index):
+        vector = self.vector[index].copy()
         label_grid = self.label_grid[index].copy()
         sensor_grid = self.sensor_grid[index].copy()
-        id_grid = self.id_grid[index].copy()
         if self.phase != 'train':
-            vector = self.vector[index].copy()
-        #     id_grid = self.id_grid[index].copy()
+            id_grid = self.id_grid[index].copy()
             return (vector, label_grid, sensor_grid, id_grid)
         else:
-        #     return (label_grid, sensor_grid)
-            return (label_grid, sensor_grid, id_grid)
+            return (vector, label_grid, sensor_grid)
 
 def _flatten_helper(T, N, _tensor):
     return _tensor.reshape(T * N, *_tensor.size()[2:])
@@ -137,20 +130,21 @@ def rearrange(data):
     data = data.transpose(1,0)   
     return _flatten_helper(T, N, data.squeeze(1)) 
 
-def stack_tensors(label_grid, sensor_grid, id_grid=None):
+def stack_tensors(vector, label_grid, sensor_grid, id_grid=None):
+    vector = rearrange(vector)
     label_grid = rearrange(label_grid)
     sensor_grid = rearrange(sensor_grid)
     if id_grid is not None:
         id_grid = rearrange(id_grid)
     # if mask is not None:
     #     mask = rearrange(mask)
-    return label_grid, sensor_grid, id_grid# ,  mask
+    return vector, label_grid, sensor_grid, id_grid# ,  mask
 
-def to_cuda(label_grid, sensor_grid, id_grid=None): 
+def to_cuda(vector, label_grid, sensor_grid, id_grid=None): 
     if id_grid is not None:
-        return label_grid.to(device), sensor_grid.to(device), id_grid.to(device)
+        return vector.to(device), label_grid.to(device), sensor_grid.to(device), id_grid.to(device)
     else:
-        return label_grid.to(device), sensor_grid.to(device), id_grid
+        return vector.to(device), label_grid.to(device), sensor_grid.to(device), id_grid
 
 
 def reconstruction_loss(x, x_recon):
@@ -205,17 +199,14 @@ def Label_vae_evaluate(beta, logging, loader, model, epoch=None):
             vector : (T*N, 36)
             *_grid : (T*N, 120, 120)
             """     
-            label_grid, sensor_grid, id_grid = stack_tensors(label_grid, sensor_grid, id_grid)  # (N,T, ...) --> (T*N, ...)                   
+            vector, label_grid, sensor_grid, id_grid = stack_tensors(vector, label_grid, sensor_grid, id_grid)  # (N,T, ...) --> (T*N, ...)       
 
-            mu_l, logvar_l, z_l, decoded_l = model(label_grid)    
+            c_vector = vector[...,:4].clone()
+            c_vector[...,:2] = (vector[...,:2]-vector[...,5:7]).clone()
             
-            ## Estimating only humans
-            # Remove walls
-            target_grid = label_grid.clone()
-            target_grid[id_grid==-9999.] = 0.0           
-            
-            # recon_loss, k_loss = VAE_loss(label_grid, decoded_l, mu_l, logvar_l)
-            recon_loss, k_loss = VAE_loss(target_grid, decoded_l, mu_l, logvar_l)
+            mu_l, logvar_l, z_l, decoded_l = model(label_grid, c_vector)    
+
+            recon_loss, k_loss = VAE_loss(label_grid, decoded_l, mu_l, logvar_l)
             loss = recon_loss + k_loss * beta
 
 
@@ -252,37 +243,36 @@ def Label_vae_evaluate(beta, logging, loader, model, epoch=None):
             robot_traj = []
             a1_traj = []
             a2_traj = []
-            # a3_traj = []
-            # a4_traj = []
-            # a5_traj = []
-            # a6_traj = []
+            a3_traj = []
+            a4_traj = []
+            a5_traj = []
+            a6_traj = []
             # vector length : robot 9, human 5
             robot_traj.append(vectors[k, 0, :2]) 
             a1_traj.append(vectors[k, 0, 9:11]) 
             a2_traj.append(vectors[k, 0, 14:16]) 
-            # a3_traj.append(vectors[k, 0, 19:21]) 
-            # a4_traj.append(vectors[k, 0, 24:26]) 
-            # a5_traj.append(vectors[k, 0, 29:31]) 
-            # a6_traj.append(vectors[k, 0, 34:36])
+            a3_traj.append(vectors[k, 0, 19:21]) 
+            a4_traj.append(vectors[k, 0, 24:26]) 
+            a5_traj.append(vectors[k, 0, 29:31]) 
+            a6_traj.append(vectors[k, 0, 34:36])
 
             robot_traj = np.array(robot_traj) 
             a1_traj = np.array(a1_traj)
             a2_traj = np.array(a2_traj)
-            # a3_traj = np.array(a3_traj)
-            # a4_traj = np.array(a4_traj)
-            # a5_traj = np.array(a5_traj)
-            # a6_traj = np.array(a6_traj)
+            a3_traj = np.array(a3_traj)
+            a4_traj = np.array(a4_traj)
+            a5_traj = np.array(a5_traj)
+            a6_traj = np.array(a6_traj)
             ax.plot(robot_traj[:,0], robot_traj[:,1], 'r+')
             ax.plot(a1_traj[:,0], a1_traj[:,1], 'bo')
             ax.plot(a2_traj[:,0], a2_traj[:,1], 'go')
-            # ax.plot(a3_traj[:,0], a3_traj[:,1], 'yo')
-            # ax.plot(a4_traj[:,0], a4_traj[:,1], 'co')
-            # ax.plot(a5_traj[:,0], a5_traj[:,1], 'mo')
-            # ax.plot(a6_traj[:,0], a6_traj[:,1], 'ko')
+            ax.plot(a3_traj[:,0], a3_traj[:,1], 'yo')
+            ax.plot(a4_traj[:,0], a4_traj[:,1], 'co')
+            ax.plot(a5_traj[:,0], a5_traj[:,1], 'mo')
+            ax.plot(a6_traj[:,0], a6_traj[:,1], 'ko')
             ax.set_title('traj')
             i = 2 
-            # for grid in [label_grid[k], decoded_l[k]]:
-            for grid in [target_grid[k], decoded_l[k]]:
+            for grid in [label_grid[k], decoded_l[k]]:
                 ax = axes[i-1]
                 Con = ax.contourf(grid.squeeze(0).cpu().numpy(), cmap='binary', vmin = 0.0, vmax = 1.0)
                 i+=1     
@@ -305,19 +295,14 @@ def Label_vae_train(beta, logging, train_loader, validation_loader, model, ckpt_
         k_loss_epoch = []
         loop = tqdm(train_loader, total = len(train_loader), leave = True)
         
-        for label_grid, sensor_grid, id_grid in loop: 
+        for vector, label_grid, sensor_grid in loop: 
+            vector, label_grid, sensor_grid, _ = stack_tensors(vector, label_grid, sensor_grid)  # (N,T, ...) --> (T*N, ...)    
 
-            label_grid, sensor_grid, id_grid = stack_tensors(label_grid, sensor_grid, id_grid)  # (N,T, ...) --> (T*N, ...)       
-
-            mu_l, logvar_l, z_l, decoded_l = model(label_grid)    
+            c_vector = vector[...,:4].clone()
+            c_vector[...,:2] = (vector[...,:2]-vector[...,5:7]).clone()
             
-            ## Estimating only humans
-            # Remove walls
-            target_grid = label_grid.clone()
-            target_grid[id_grid==-9999.] = 0.0     
-            
-            # recon_loss, k_loss = VAE_loss(label_grid, decoded_l, mu_l, logvar_l)
-            recon_loss, k_loss = VAE_loss(target_grid, decoded_l, mu_l, logvar_l)
+            mu_l, logvar_l, z_l, decoded_l = model(label_grid, c_vector)    
+            recon_loss, k_loss = VAE_loss(label_grid, decoded_l, mu_l, logvar_l)
             loss = recon_loss + k_loss * beta
         
 
@@ -338,7 +323,7 @@ def Label_vae_train(beta, logging, train_loader, validation_loader, model, ckpt_
         writer.add_scalar('Label_VAE_train_recon_loss', avg_recon_loss, epoch)
         writer.add_scalar('Label_VAE_train_val_k_loss', avg_k_loss, epoch)
         
-        if epoch % 20 == 0 :
+        if epoch % 2 == 0 :
             loop.set_postfix(loss = Label_vae_evaluate(beta, logging, validation_loader, model, epoch))
             ckpt_file = os.path.join(ckpt_path, 'label_weight_'+str(epoch)+'.pth')
             torch.save(model.state_dict(), ckpt_file)
@@ -384,22 +369,14 @@ def Sensor_vae_evaluate(beta, logging, loader, gt_model, model, epoch=None, PaS_
             mask : (N, 5)
             """            
             # label_grid, sensor_grid, _ = stack_tensors(label_grid, sensor_grid)  # (N,T, ...) --> (T*N, ...)       
-            label_grid, sensor_grid, id_grid = to_cuda(label_grid, sensor_grid, id_grid)
+            label_grid, sensor_grid, _ = to_cuda(label_grid, sensor_grid)
             
             mu, logvar, z = model(sensor_grid)  
             _, _, z_l, _ = gt_model(label_grid)
-            decoded = gt_model.decoder(z) # Needed for visualization even if not used for training.
+            decoded = gt_model.decoder(z)
             PaS_loss = MSE(z, z_l)     
             if est_coef>0:
-                ## Estimating only occluded human agents
-                # Remove walls
-                target_grid = label_grid[:,-1].clone()
-                target_grid[id_grid[:,-1]==-9999.] = 0.0
-                # Remove seen (including partially visible) humans
-                target_grid[sensor_grid[:,-1]==1.] == 0.0              
-    
-                # est_loss, k_loss = VAE_loss(label_grid[:,-1].squeeze(1), decoded.squeeze(1), mu, logvar)
-                est_loss, k_loss = VAE_loss(target_grid.squeeze(1), decoded.squeeze(1), mu, logvar)
+                est_loss, k_loss = VAE_loss(label_grid[:,-1].squeeze(1), decoded.squeeze(1), mu, logvar)
                 loss = est_coef * est_loss + k_loss * beta   +  PaS_coef * PaS_loss
             else:
                 est_loss = torch.zeros(1).cuda()
@@ -529,32 +506,32 @@ def Sensor_vae_evaluate(beta, logging, loader, gt_model, model, epoch=None, PaS_
             robot_traj = []
             a1_traj = []
             a2_traj = []
-            # a3_traj = []
-            # a4_traj = []
-            # a5_traj = []
-            # a6_traj = []
+            a3_traj = []
+            a4_traj = []
+            a5_traj = []
+            a6_traj = []
             for i in range(sequence): # vector length : robot 9, human 5
                 robot_traj.append(vectors[k, i, :2]) # (N, T, 36)
                 a1_traj.append(vectors[k, i, 9:11]) # vector[k, i, 6:8]
                 a2_traj.append(vectors[k, i, 14:16]) # vector[k, i, 11:13]
-                # a3_traj.append(vectors[k, i, 19:21]) # vector[k, i, 6:8]
-                # a4_traj.append(vectors[k, i, 24:26]) # vector[k, i, 11:13]
-                # a5_traj.append(vectors[k, i, 29:31]) # vector[k, i, 6:8]
-                # a6_traj.append(vectors[k, i, 34:36]) # vector[k, i, 11:13]
+                a3_traj.append(vectors[k, i, 19:21]) # vector[k, i, 6:8]
+                a4_traj.append(vectors[k, i, 24:26]) # vector[k, i, 11:13]
+                a5_traj.append(vectors[k, i, 29:31]) # vector[k, i, 6:8]
+                a6_traj.append(vectors[k, i, 34:36]) # vector[k, i, 11:13]
             robot_traj = np.array(robot_traj) # (sequence,2)
             a1_traj = np.array(a1_traj)# (sequence,2)
             a2_traj = np.array(a2_traj)# (sequence,2)
-            # a3_traj = np.array(a3_traj)# (sequence,2)
-            # a4_traj = np.array(a4_traj)# (sequence,2)
-            # a5_traj = np.array(a5_traj)# (sequence,2)
-            # a6_traj = np.array(a6_traj)# (sequence,2)
+            a3_traj = np.array(a3_traj)# (sequence,2)
+            a4_traj = np.array(a4_traj)# (sequence,2)
+            a5_traj = np.array(a5_traj)# (sequence,2)
+            a6_traj = np.array(a6_traj)# (sequence,2)
             ax.plot(robot_traj[:,0], robot_traj[:,1], 'r+')
             ax.plot(a1_traj[:,0], a1_traj[:,1], 'bo')
             ax.plot(a2_traj[:,0], a2_traj[:,1], 'go')
-            # ax.plot(a3_traj[:,0], a3_traj[:,1], 'yo')
-            # ax.plot(a4_traj[:,0], a4_traj[:,1], 'co')
-            # ax.plot(a5_traj[:,0], a5_traj[:,1], 'mo')
-            # ax.plot(a6_traj[:,0], a6_traj[:,1], 'ko')
+            ax.plot(a3_traj[:,0], a3_traj[:,1], 'yo')
+            ax.plot(a4_traj[:,0], a4_traj[:,1], 'co')
+            ax.plot(a5_traj[:,0], a5_traj[:,1], 'mo')
+            ax.plot(a6_traj[:,0], a6_traj[:,1], 'ko')
             
             ax.set_title('traj')
             i = 2 
@@ -595,15 +572,21 @@ def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, m
         est_loss_epoch = []
         loop = tqdm(train_loader, total = len(train_loader), leave = True)
         
-        for label_grid, sensor_grid, id_grid in loop:
+        for vector, label_grid, sensor_grid in loop:
             """[summary]
             vector : (N, T, 36)
             _grid : (N, T, 120, 120)
             rnn_ : (N, T, 128)
             mask : (N, 5)
             """            
-            label_grid, sensor_grid, id_grid = to_cuda(label_grid, sensor_grid, id_grid)
-            # label_grid, sensor_grid, _ = stack_tensors(label_grid, sensor_grid)  # (N,T, ...) --> (T*N, ...)       
+            vector, label_grid, sensor_grid, _ = to_cuda(vector, label_grid, sensor_grid)
+            # label_grid, sensor_grid, _ = stack_tensors(label_grid, sensor_grid)  # (N,T, ...) --> (T*N, ...)  
+            
+            pdb.set_trace()
+            
+            c_vector = vector[...,:4].clone()
+            c_vector[...,:2] = (vector[...,:2]-vector[...,5:7]).clone()
+            c_vector = c_vector.view(len(c_vector), -1)     
             
             mu, logvar, z = model(sensor_grid)  
             with torch.no_grad():
@@ -612,16 +595,7 @@ def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, m
             PaS_loss = MSE(z_l, z)     
             if est_coef>0:
                 decoded = gt_model.decoder(z)
-                
-                ## Estimating only occluded human agents
-                # Remove walls
-                target_grid = label_grid[:,-1].clone()
-                target_grid[id_grid[:,-1]==-9999.] = 0.0
-                # Remove seen (including partially visible) humans
-                target_grid[sensor_grid[:,-1]==1.] == 0.0              
-                
-                # est_loss, k_loss = VAE_loss(label_grid[:,-1].squeeze(1), decoded.squeeze(1), mu, logvar)
-                est_loss, k_loss = VAE_loss(target_grid.squeeze(1), decoded.squeeze(1), mu, logvar)
+                est_loss, k_loss = VAE_loss(label_grid[:,-1].squeeze(1), decoded.squeeze(1), mu, logvar)
                 loss = est_coef * est_loss + k_loss * beta   +  PaS_coef * PaS_loss
             else:
                 with torch.no_grad():
@@ -672,7 +646,7 @@ def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, m
 if __name__ == "__main__":
 
     device = ("cuda" if torch.cuda.is_available() else "cpu")
-    num_epochs = 100 # 300 # 60 for the turtlebot experiment
+    num_epochs = 2 # 40 # 300 # 60 for the turtlebot experiment
     beta = 0.00025
 
     algo_args = get_args()
@@ -695,7 +669,7 @@ if __name__ == "__main__":
     
     import logging
 
-    output_path = 'entering_room' #'crossing_H12' #'LabelVAE_CircleFOV30'
+    output_path = 'entering_room_data' #'crossing_H12' #'LabelVAE_CircleFOV30'
 
     # configure logging
     out_dir = 'data/'+ output_path  

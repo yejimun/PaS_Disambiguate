@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore')
 
 
 # Find the unknown cells using polygons for faster computation. (Result similar to ray tracing)
-def generateSensorGrid(label_grid, ego_dict, ref_dict, wall_polygons, map_xy, FOV_radius, res=0.1):
+def generateSensorGrid(label_grid, ego_dict, ref_dict, wall_polygons, map_xy, FOV_radius, res=0.1, partial_visibility=True):
 	x_local, y_local = map_xy
 	
 	center_ego = ego_dict['pos']
@@ -112,11 +112,12 @@ def generateSensorGrid(label_grid, ego_dict, ref_dict, wall_polygons, map_xy, FO
 		sensor_grid[wall_mask] = 1.  # occupied / visible
 
 	# sensor_grid = np.where(sensor_grid==2,0,sensor_grid)
-	# for id in unique_id:
-	# 	mask1 =	(label_grid[1,:,:]==id)
-	# 	if np.any(sensor_grid[mask1] == 1.):
-	# 		sensor_grid[mask1] = 1.  # occupied / visible
-	# 		visible_id.append(id)	
+	for id in unique_id:
+		mask1 =	(label_grid[1,:,:]==id)
+		if np.any(sensor_grid[mask1] == 1.):
+			if not partial_visibility:
+				sensor_grid[mask1] = 1.  # occupied / visible
+			visible_id.append(id)	
 
 	return visible_id, sensor_grid 
 

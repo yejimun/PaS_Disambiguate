@@ -91,11 +91,11 @@ def main():
 
 
     if phase =='train':
-        data_size = 1000  # 500 for turtlebot exp w/ 4 humans
+        data_size = 500 # 1000  # 500 for turtlebot exp w/ 4 humans
     elif phase =='val':
-        data_size = 100 # 50 for turtlebot exp w/ 4 humans
+        data_size = 50 # 100 # 50 for turtlebot exp w/ 4 humans
     elif phase =='test':
-        data_size = 200 # 100 for turtlebot exp w/ 4 humans
+        data_size = 100 # 200 # 100 for turtlebot exp w/ 4 humans
 
     else:
         raise NotImplementedError

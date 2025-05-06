@@ -98,8 +98,8 @@ class Config(object):
     robot.v_pref = 2 # 0.5 #2. #0.65 # ! 
     robot.sensor = "coordinates"
     # FOV = this values * PI
-    robot.FOV = 2.
-    robot.FOV_radius = 3.0
+    robot.FOV = 2. # radius of the FOV
+    robot.FOV_radius = 3.0 
     robot.limited_path = False  
     robot.onedim_action = False 
     robot.loop = 1

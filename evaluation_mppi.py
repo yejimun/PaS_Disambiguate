@@ -123,9 +123,18 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                 # decoded = label_vae.decoder(z) # (1,1,100,100)
                                                 
                 ### Using the ground truth occupancy of all human agents.
-                decoded = obs['label_grid'][:,[0]].clone()
+                decoded = obs['label_grid'][:,0].clone()
                 # ignore the walls
-                decoded = torch.where(obs['label_grid'][:,[1]]==-9999., torch.tensor(0.0), decoded)
+                decoded = torch.where(obs['label_grid'][:,1]==-9999., torch.tensor(0.0), decoded)
+                # # only care about the agents that are fully occluded
+                # human_ids = torch.unique(obs['label_grid'][:,[1]])
+                # human_ids = human_ids[torch.logical_and(human_ids!=-9999., ~torch.isnan(human_ids))]
+                # for h_id in human_ids:
+                #     h_indices = torch.where(obs['label_grid'][:,[1]]==h_id)
+                #     if torch.any(obs['grid'][[[-1]]][h_indices]==1.): # if human is partially seen, remove from the decoded
+                #         decoded[h_indices]=0.
+                        
+                    
                 
                 # To test the disambiguation, manually place a estimation in the decoded grid in the unknown area. 30 degree from the robot's heading
                 # decoded[0,0,80:90,80:90] = 1.0
@@ -212,9 +221,9 @@ def evaluate(rollouts, config, model_dir, label_vae, sensor_vae, mppi_module, ev
                 plot_ego_states(config.env.time_step, trajectories, model_dir, k)
                 
                 ### Using the ground truth occupancy of all human agents.
-                decoded = obs['label_grid'][:,[0]].clone()
+                decoded = obs['label_grid'][:,0].clone()
                 # ignore the walls
-                decoded = torch.where(obs['label_grid'][:,[1]]==-9999., torch.tensor(0.0), decoded)                
+                decoded = torch.where(obs['label_grid'][:,1]==-9999., torch.tensor(0.0), decoded)                
                       
                 action, disambig_R_map = mppi_module.plan(obs, decoded, baseEnv.wall_polygons, config)
                 # all_videoGrids.append(obs['label_grid'][:,0].cpu().numpy())

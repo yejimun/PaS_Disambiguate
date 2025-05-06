@@ -46,9 +46,11 @@ class CrowdSimDict(CrowdSim):
         """
         if self.collectingdata:   
             robot_vec_length = 9
+            self.partial_visibility = False
         else:
             # if self.config.action_space.kinematics=="holonomic":
             robot_vec_length = 4
+            self.partial_visibility = True
             # else:
             #     robot_vec_length = 5
         d={}         
@@ -116,7 +118,7 @@ class CrowdSimDict(CrowdSim):
         map_xy = [x_map, y_map]
 
         if self.gridsensor == 'sensor' or self.collectingdata:
-            visible_id, sensor_grid = generateSensorGrid(label_grid, ego_dict, other_dict, self.wall_polygons, map_xy, self.FOV_radius, res=self.grid_res)
+            visible_id, sensor_grid = generateSensorGrid(label_grid, ego_dict, other_dict, self.wall_polygons, map_xy, self.FOV_radius, res=self.grid_res, partial_visibility=self.partial_visibility)
             self.visible_ids.append(visible_id)
         else:
             visible_id = np.unique(label_grid[1])[:-1]

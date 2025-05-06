@@ -123,7 +123,8 @@ def compute_disambig_cost(robot_pos, grid_xy, sensor_grid, next_sensor_grid, dec
     The ambiguation cost is computed on the unobserved area of the sensor grid. 
     The entropy is maximized in the estimated PaS occupancy.
         
-    sensor_grid:  [batch_size, H, W] consists of values [0, 0.5, 1] in the same coordinate as decoded_in_unknown.
+    sensor_grid:  [batch, H, W] consists of values [0, 0.5, 1] in the same coordinate as decoded_in_unknown.
+    next_sensor_grid: (batch,H,W)
     decoded_in_unknown: (H,W) should only be estimating the unobserved areas. Otherwise, it should be the ground truth or zero.        
     """
     # from crowd_sim.envs.generateLabelGrid import generateLabelGrid
@@ -140,13 +141,12 @@ def compute_disambig_cost(robot_pos, grid_xy, sensor_grid, next_sensor_grid, dec
     # Calculate the uncertainty reward
     ## We want to compute uncertainty in the unobserved area for both the current and next sensor grid.
     ## Obtain the unobserved area in both current and next sensor grid and set them to 0.5. Otherwise, 0 for both observed free and occupied cells.
-    integrated_sensor = torch.zeros(sensor_grid.shape, device=sensor_grid.device).to(decoded_in_unknown.dtype)
-    integrated_sensor[torch.logical_and(sensor_grid==0.5, next_sensor_grid==0.5)] = 0.5
+    integrated_sensor = torch.zeros(next_sensor_grid.shape, device=next_sensor_grid.device).to(decoded_in_unknown.dtype)
+    unexplored_area_mask = torch.logical_and(sensor_grid==0.5, next_sensor_grid==0.5)
     
     ## Transfer the PaS estimation to the unknown area of the integrated unknown grid
-    integrated_sensor[integrated_sensor==0.5] = decoded_in_unknown.repeat(len(integrated_sensor),1,1)[integrated_sensor==0.5] 
+    integrated_sensor[unexplored_area_mask] = decoded_in_unknown.unsqueeze(0).repeat(len(integrated_sensor),1,1)[unexplored_area_mask] 
     # zero_mask = integrated_sensor==0.
-
     integrated_sensor = integrated_sensor * disambig_weight_map * 0.5 # Making the estimated occupancy the most uncertain.
     disambig_reward_map = -integrated_sensor*torch.log(integrated_sensor)-(1-integrated_sensor)*torch.log(1-integrated_sensor) #(~zero_mask) # integrated_sensor == 0. or 1. is nan
     disambig_reward_map[torch.isnan(disambig_reward_map)] = 0. # make nan to 0.
@@ -391,8 +391,8 @@ def generateSensorGrid_mppi(label_grid, h_pos, h_radius, r_pos, map_xy, FOV_radi
         # sensor_grid_numpy = sensor_grid.cpu().numpy()
         # wall_polygons_numpy = [poly.cpu().numpy() for poly in wall_polygons]
         # print(wall_polygons)
-        
-        sensor_grid = wall_raytracing(map_xy, sensor_grid, r_pos, wall_polygons)
+        for wall_poly in wall_polygons:
+            sensor_grid = wall_raytracing(map_xy, sensor_grid, r_pos, [wall_poly])
         
         # sensor_grid = wall_raytracing(map_xy_numpy, sensor_grid_numpy, r_pos, wall_polygons_numpy)    
         # sensor_grid = torch.tensor(sensor_grid, device=label_grid.device) # [K, H, W]  
@@ -421,6 +421,9 @@ def generateSensorGrid_mppi(label_grid, h_pos, h_radius, r_pos, map_xy, FOV_radi
     return sensor_grid # , visible_id 
 
 def wall_raytracing(local_xy, sensor_grid_batch, center_ego_batch, poly_verts):
+    """
+    poly_verts: verticies of a wall polygon
+    """
     batch_size = sensor_grid_batch.shape[0]
     x_local, y_local = local_xy
 
@@ -429,7 +432,7 @@ def wall_raytracing(local_xy, sensor_grid_batch, center_ego_batch, poly_verts):
 
     sensor_grid_batch = sensor_grid_batch.clone()
 
-    poly_verts = torch.stack(poly_verts) # (N, num_verts, 2)=(1,4,2)
+    poly_verts = torch.stack(poly_verts) # (N, num_verts, 2)=(1,4,2) # N=1
 
     # x_inside = (poly_verts[:, :, 0] >= x_min) & (poly_verts[:, :, 0] <= x_max)
     # y_inside = (poly_verts[:, :, 1] >= y_min) & (poly_verts[:, :, 1] <= y_max)

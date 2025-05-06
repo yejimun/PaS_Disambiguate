@@ -25,11 +25,32 @@ Details of the simulation framework can be found
 
 2. MPPI/PPO configurations: modify arguments.py 
 
-### Run the code
+### Run 'Circle Crossing'
 
 1. Collect data for training GT-VAE.
 - In `crowd_nav/configs/config.py`, set (i) `robot.policy` to `orca` and (ii) `sim.collectingdata` to `True`
 - In `arguments.py`, set `output_dir` to `VAEdata_CircleFOV30/{phase}` where phase is `train` or `val` or `test`
+Run the following commands for all three phases.
+```
+python collect_data.py 
+```
+2. Pretrain GT-VAE (label_vae) and PaS-VAE (sensor_vae) with collected data. Update the `output_path` to data path in `vae_pretrain.py`
+```
+python vae_pretrain.py 
+```
+3. Run mppi with pretained vae. There is no actual training involved in this step, but evaluation.
+- In `train_mppi.py`, modify `label_ckpt_dir` and `pas_ckpt_dir`
+- In `arguments.py`, set `output_dir` to `data/{foldername}` (i.e. `data/mppi`)
+```
+python train_mppi.py 
+```
+
+
+### Run 'Entering Room'
+1. Collect data for training GT-VAE.
+- Use `crowd_nav/configs/config_entering_room.py` as `crowd_nav/configs/config.py`
+- In `crowd_nav/configs/config.py`, set (i) `robot.policy` to `pas_mppi`, (ii) `sim.collectingdata` to `True`, and (iii) `reward.disambig_reward_flag` to `False`
+- In `arguments.py`, set `output_dir` to `entering_room_data/{phase}` where phase is `train` or `val` or `test`
 Run the following commands for all three phases.
 ```
 python collect_data.py 

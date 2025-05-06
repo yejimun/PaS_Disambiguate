@@ -56,11 +56,11 @@ class ORCA(Policy):
         self.name = 'ORCA'
         self.max_neighbors = None
         self.radius = None
-        self.max_speed = 1 # the ego agent assumes that all other agents have this max speed
+        self.max_speed = config.humans.v_pref # the ego agent assumes that all other agents have this max speed
         self.sim = None
 
 
-    def predict(self, state):
+    def predict(self, state, staticObstacles=None):
         """
         Create a rvo2 simulation at each time step and run one step
         Python-RVO2 API: https://github.com/sybrenstuvel/Python-RVO2/blob/master/src/rvo2.pyx
@@ -96,7 +96,7 @@ class ORCA(Policy):
         # Set the preferred velocity to be a vector of unit magnitude (speed) in the direction of the goal.
         velocity = np.array((self_state.gx - self_state.px, self_state.gy - self_state.py))
         speed = np.linalg.norm(velocity)
-        pref_vel = velocity / speed if speed > 1 else velocity
+        pref_vel = velocity / speed * self.max_speed if speed > 1 else velocity
 
         # Perturb a little to avoid deadlocks due to perfect symmetry.
         # perturb_angle = np.random.random() * 2 * np.pi

@@ -16,25 +16,25 @@ class Config(object):
     reward.success_reward = -5 
     reward.collision_penalty = 100
     reward.timeout_penalty = None 
-    reward.discomfort_dist = 0.3 # 0.3
+    reward.discomfort_dist = 0.5 # 1.0 # 0.3
     reward.discomfort_penalty_factor = 10 #0.3 #4 # 2 #10 
-    reward.disambig_reward_flag = True #True # 'True' or 'False'
+    reward.disambig_reward_flag = False #True # 'True' or 'False'
     reward.disambig_method = 'entropy' # 'linear' or 'entropy'
-    reward.disambig_factor = 10 # 0.3 #0.1 #0.003 # 10.#0.01 # 0.003
+    reward.disambig_factor = 20 # 0.3 #0.1 #0.003 # 10.#0.01 # 0.003
 
     sim = BaseConfig()
-    sim.collectingdata = False #False #False # or True  
-    sim.train_val_sim = "entering_room" # "static_human_behindWall" #"entering_room" #'static_obstacles' # "circle_crossing"
-    sim.test_sim = "entering_room" # "static_human_behindWall" #"entering_room" #'static_obstacles' # "circle_crossing" 
+    sim.collectingdata = True #False #False # or True  
+    sim.train_val_sim = "entering_room" # "entering_room" # "static_human_behindWall" #"entering_room" #'static_obstacles' # "circle_crossing"
+    sim.test_sim = "entering_room" # "entering_room" # "static_human_behindWall" #"entering_room" #'static_obstacles' # "circle_crossing" 
     sim.square_width = 10
     sim.circle_radius = 5.
-    sim.human_num = 1 # 12 #6 # 12  # 6 # 4 for turtlebot experiment
+    sim.human_num = 2 # 12 #6 # 12  # 6 # 4 for turtlebot experiment
 
     humans = BaseConfig()
     humans.visible = True
     humans.policy = "orca" #"social_force" # "orca"
     humans.radius = 0.3 #0.5 #0.3  # TODO: change back to 0.3
-    humans.v_pref = 1. # 0.5 for the turtlebot experiment
+    humans.v_pref = 2. # 0.5 for the turtlebot experiment
     humans.sensor = "coordinates"
     # FOV = this values * PI
     humans.FOV = 2.
@@ -63,11 +63,11 @@ class Config(object):
     robot.policy = 'pas_mppi' #'pas_mppi' #'pas_diffstack' #'pas_rnn'  #'orca' 
     robot.radius = 0.3
     robot.w_max = 0.5 # for unicycle. robot.w_max*PI
-    robot.v_pref = 2 #2 # 0.5 for the turtlebot experiment
+    robot.v_pref = 2. #2 # 0.5 for the turtlebot experiment
     robot.sensor = "coordinates"
     # FOV = this values * PI
     robot.FOV = 2. # radius of the FOV
-    robot.FOV_radius = 2.5 #3.5 #2.5
+    robot.FOV_radius = 2. #3.5 #2.5
     robot.disambig_angle = 1 #0.6
     robot.limited_path = False  
     robot.onedim_action = False 

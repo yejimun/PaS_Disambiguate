@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 def _ensure_non_zero(cost, beta, factor):
     return torch.exp(-factor * (cost - beta))
 
-
 # TODO: improve transfer_to_ego_grid to be more efficient and work with various batch size in either direction. Maybe try using https://github.com/getkeops/keops/tree/main.
 # TODO: use the PaS next sensor grid to compute the costs
 # TODO: check the Disambig formulation
@@ -33,6 +32,12 @@ def _ensure_non_zero(cost, beta, factor):
 # 4/8
 # TODO: Make robot movement larger.
 
+# 4/29
+# TODO: Test with discomfort_vel_c
+# TODO: adjust discomfort distance based on the heading of agents
+
+# 5/1
+# TODO: Check the disambig_c reward (sensor_grid, next_sensor_grid shape)
 
 # Set random seed for reproducibility
 seed = 0
@@ -434,6 +439,7 @@ class MPPI():
 class MPPI_Planner():
     def __init__(self,config, args, device):
         self.config = config
+        self.disambig_reward_flag = self.config.reward.disambig_reward_flag
         self.args = args
         self.device = device
         self.sequence = self.config.pas.sequence
@@ -570,8 +576,8 @@ class MPPI_Planner():
     
     def visualize_disambig_traj(self,r_state, next_r_state, goal_pos, highlight_indices=None, map_xy=None, sensor_grid=None, wall_polygons=None, h_states=None, lowest_interest_indices=None, lowest_cost_ind=None, cost=None):
         """
-        r_state: robot's current state (K,2)
-        next_r_state: robot's next state (K,2)
+        r_state: robot's current state (batch_size, K,2)
+        next_r_state: robot's next state (batch_size, K,2)
         """
         ## Sanity check: Visualize the human and robot's positions in circle and masks in multiple plots
         # make visualizaton directory
@@ -593,7 +599,7 @@ class MPPI_Planner():
         # ax.plot(r_state[0,:,0].cpu(), r_state[0,:,1].cpu(), 'k+', markersize=10)
         # ax.plot(next_r_state[0,:,0].cpu(), next_r_state[0,:,1].cpu(), 'k*', markersize=10)
         ax.plot(goal_pos[0].cpu(), goal_pos[1].cpu(), 'y*', markersize=10)
-        ax.set_title("Cost:{}".format(cost))
+        # ax.set_title("Disambig Cost:{}".format(cost[lowest_cost_ind]))
         
         if highlight_indices is not None:
             # for idx in  highlight_indices:
@@ -602,9 +608,9 @@ class MPPI_Planner():
             ax.plot(r_state[0,highlight_indices,0].cpu(), r_state[0,highlight_indices,1].cpu(), 'bo', markersize=10)
             ax.plot(next_r_state[0,highlight_indices,0].cpu(), next_r_state[0,highlight_indices,1].cpu(), 'go', markersize=10)
             
-        # if lowest_interest_indices is not None:
-        #     # ax.plot(r_state[0,lowest_interest_indices,0].cpu(), r_state[0,lowest_interest_indices,1].cpu(), 'g+', markersize=10)
-        #     ax.plot(next_r_state[0,lowest_interest_indices,0].cpu(), next_r_state[0,lowest_interest_indices,1].cpu(), 'go', markersize=10)
+        if lowest_interest_indices is not None:
+            # ax.plot(r_state[0,lowest_interest_indices,0].cpu(), r_state[0,lowest_interest_indices,1].cpu(), 'g+', markersize=10)
+            ax.plot(next_r_state[0,lowest_interest_indices,0].cpu(), next_r_state[0,lowest_interest_indices,1].cpu(), 'go', markersize=10)
     
         if lowest_cost_ind is not None:
             ax.plot(r_state[0,lowest_cost_ind,0].cpu(), r_state[0,lowest_cost_ind,1].cpu(), 'r*', markersize=10)
@@ -612,7 +618,7 @@ class MPPI_Planner():
         
         if sensor_grid is not None:
             map_x, map_y = map_xy
-            ax.contourf(map_x.cpu().numpy(),map_y.cpu().numpy(), sensor_grid.cpu().numpy(), cmap='binary', levels=np.linspace(0, 1, 9))
+            ax.contourf(map_x.cpu().numpy(),map_y.cpu().numpy(), sensor_grid.cpu().numpy(), cmap='binary', levels=np.linspace(0, 1, 9), extend='both')
             
             
         ## add humans
@@ -690,7 +696,7 @@ class MPPI_Planner():
 
         # save the figure
         plt.title("Visible ids: " + str(self.vis_ids))
-        plt.savefig("mppi_sanitycheck/vis_plot" + str(k)+".png")
+        plt.savefig(save_dir+"/vis_plot" + str(k)+".png")
         plt.close()       
         
 
@@ -722,16 +728,24 @@ class MPPI_Planner():
         repeated_next_r_state = next_r_state.unsqueeze(-2).repeat(1,1,self.human_num,1)
         
         #### Updated
-        # Make invisible humans a far away dummy value
-        decoded_in_unknown = torch.where(self.curr_sensor_grid==0.5, decoded[0,0], torch.tensor(0.0))
-        decoded_human_id = torch.unique(self.curr_label_grid[1][decoded_in_unknown>0.4,])
-        
+        # Make invisible humans (fully occluded) a far away dummy value
+        # # only care about the agents that are fully occluded
+        decoded_in_unknown = decoded.clone().squeeze(0) # (H, W)
+        decoded_in_unknown[self.curr_sensor_grid!=0.5] = 0. # (H, W)
+        human_ids = torch.unique(self.curr_label_grid[1])
+        human_ids = human_ids[torch.logical_and(human_ids!=-9999., ~torch.isnan(human_ids))]
+        invisible_human_ids = human_ids.clone()
+        for h_id in human_ids:
+            h_indices = torch.where(self.curr_label_grid[1]==h_id)
+            if torch.any(self.curr_sensor_grid[h_indices]==1.): # if human is partially seen, remove from the decoded
+                decoded_in_unknown[h_indices]=0.
+                invisible_human_ids = invisible_human_ids[invisible_human_ids!=h_id] # removing the visible human id
+                
+        self.decoded_in_unknown = decoded_in_unknown
+                
         next_vis_h_state = next_h_state.clone()
-        if len(decoded_human_id)>0:
-            if len(decoded_human_id)>1: # For debugging in a static human behind wall scenario
-                print(decoded_human_id)
-                pdb.set_trace()
-            for id in decoded_human_id:
+        if len(invisible_human_ids)>0:
+            for id in invisible_human_ids:
                 next_vis_h_state[:,:,int(id)] = torch.tensor([100,100]) # dummy position to invisible human
         
         dist = torch.linalg.norm(next_vis_h_state - repeated_next_r_state, dim=-1) # (batch, K, human_num)
@@ -740,10 +754,13 @@ class MPPI_Planner():
         dmin = torch.min(dist, axis=-1)#-r_radius-h_radius[:, torch.argmin(dist, axis=-1)] # (batch, K)
         
         # Only consider the closest human
-        closest_dist = dmin.values -r_radius-h_radius[torch.arange(h_radius.shape[0]), dmin.indices].squeeze(-1) # (batch, K)
-        
         hr = h_radius[torch.arange(h_radius.shape[0]), torch.arange(h_radius.shape[1]), dmin.indices] # (batch,K)
-        
+
+        closest_dist = dmin.values -r_radius-hr # (batch, K)
+        # print(torch.any(decoded_in_unknown))
+        # print(decoded_human_id)
+        # pdb.set_trace()
+                
         # compute the collision cost for each (batch, K)
         collision_c = torch.where(closest_dist<0.,
                           torch.tensor(collision_penalty),
@@ -767,6 +784,11 @@ class MPPI_Planner():
         discomfort_c = torch.where(torch.logical_and(collision_c == 0, closest_dist < discomfort_dist),
                                    (discomfort_dist-closest_dist) * discomfort_penalty_factor * self.time_step,
                                    torch.tensor(0.0))
+        
+        ### Slow down the robot when there's human in discomfort distance. 
+        discomfort_vel_c = torch.where(discomfort_c>0., 
+                                    (next_state[...,3])**2*0.3,
+                                    torch.tensor(0.0))   
 
         ########### Costs based on ego's state vector ###########
         ## reaching goal
@@ -784,31 +806,39 @@ class MPPI_Planner():
         
         # # # TODO: decoded should only be estimating the unobserved areas. Otherwise, it should be the ground truth or zero.        
         # # # For now just depress it manually.
-        if self.config.reward.disambig_reward_flag:
+        if self.disambig_reward_flag:
             # ## Compute disambiguating cost, which gives a "reward" for reducing the entropy in the following time step
             # ## Aims to reduce the uncertainty in the unobserved areas & confirm the PaS inference.
             # # Compute PaS inference grid, estimation only in the unobserved areas and with the ground truth in the observed areas, in the time current timestep (t=0)
             
             if t == 0:
-                map_xy = self.curr_map_xy.repeat(next_r_state.shape[1],1,1,1)
+                map_xy = self.curr_map_xy.unsqueeze(0).repeat(next_r_state.shape[1],1,1,1)
                 map_xy = [map_xy[:,0], map_xy[:,1]]
                 sensor_grid = self.curr_sensor_grid.repeat(next_r_state.shape[1],1,1)
                 self.H_cur, self.disambig_R_map, self.disambig_W_map = compute_disambig_cost(r_state.squeeze(0), self.curr_map_xy, sensor_grid, sensor_grid, decoded_in_unknown, self.r_goal, self.config)
-                
+            else:
+                sensor_grid = self.curr_sensor_grid.unsqueeze(0).repeat(next_r_state.shape[1],1,1)
             # next_empty_grid = torch.zeros_like(self.curr_sensor_grid)
             ## TODO: make the untransferred areas to be unknown (0.5) in the transferred grid?
             # curr_map_xy = [self.curr_map_xy[0].unsqueeze(0), self.curr_map_xy[1].unsqueeze(0)]
             
             # # Transfer the next time-step sensor_grid information to the current map_xy since the current map is the region of interest to determine the next action. 
             # # Might not need to transfer the grid though, but just represent the next states in the current map.
-            # transferred_next_sensor_grid = Transfer_to_EgoGrid(next_map_xy, next_sensor_grid, curr_map_xy, next_empty_grid) # decoded in next time step (t=1)      
+            # transferred_next_sensor_grid = Transfer_to_EgoGrid(next_map_xy, next_sensor_grid, curr_map_xy, next_empty_grid) # decoded in next time step (t=1)     
+            
+            #### This is only for debugging/visualization purpose. Not used in the algorithm as it uses the ground truth future pos for occluded humans. ####
+            # gt_vis_ids = [i for i in range(self.config.sim.human_num)]
+            # gt_next_human_pos, gt_human_id, gt_next_robot_pos = dict_update(next_h_state, next_r_state, self.config, gt_vis_ids) 
+            # gt_next_label_grid, _, _ = generateLabelGrid_mppi(self.curr_map_xy, gt_next_human_pos, h_radius.squeeze(0), gt_human_id, gt_next_robot_pos, wall_polygons, res=grid_res)
+            # # next_map_xy = [next_x_local.to(next_label_grid.dtype), next_y_local.to(next_label_grid.dtype)]
+            # gt_next_sensor_grid = generateSensorGrid_mppi(gt_next_label_grid, gt_next_human_pos, h_radius.squeeze(0), gt_next_robot_pos, self.curr_map_xy, FOV_radius, wall_polygons, res=grid_res)
+            ############################################
 
             next_human_pos, human_id, next_robot_pos = dict_update(next_h_state, next_r_state, self.config, self.vis_ids) 
             next_label_grid, _, _ = generateLabelGrid_mppi(self.curr_map_xy, next_human_pos, h_radius.squeeze(0), human_id, next_robot_pos, wall_polygons, res=grid_res)
             # next_map_xy = [next_x_local.to(next_label_grid.dtype), next_y_local.to(next_label_grid.dtype)]
             next_sensor_grid = generateSensorGrid_mppi(next_label_grid, next_human_pos, h_radius.squeeze(0), next_robot_pos, self.curr_map_xy, FOV_radius, wall_polygons, res=grid_res)
-            H_next, disambig_R_map_next, disambig_W_map_next = compute_disambig_cost(next_r_state.squeeze(0), self.curr_map_xy, next_sensor_grid.clone(), self.curr_sensor_grid, decoded_in_unknown, self.r_goal, self.config)
-            
+            H_next, disambig_R_map_next, disambig_W_map_next = compute_disambig_cost(next_r_state.squeeze(0), self.curr_map_xy, sensor_grid, next_sensor_grid.clone(), decoded_in_unknown, self.r_goal, self.config)
             # If next entropy is reduced big (H_cur-H_next), then lower the cost. If not, increase the cost.
             ## Clip the disambig_c to be positive
             disambig_c = (H_next-self.H_cur) * self.config.reward.disambig_factor  # -(-H_next+H_cur) # torch.clamp(H_next-H_cur,min=0.0) 
@@ -818,7 +848,8 @@ class MPPI_Planner():
             
             # make the disambig_c flag based regardless of the number of grid cells
             # disambig_c = torch.where(disambig_c<0, -self.config.reward.disambig_factor, torch.tensor(0.0)).squeeze(0)       
-            disambig_c = torch.where(disambig_c<0, -self.config.reward.disambig_factor, torch.tensor(0.0)).squeeze(0)    
+            disambig_c = torch.where(disambig_c<0, self.config.reward.disambig_factor*disambig_c, torch.tensor(0.0)).squeeze(0)    
+            
             
             # # Sanity check
             # if len(collision_sample_idx) > 0: # visualize collision samples
@@ -857,21 +888,19 @@ class MPPI_Planner():
             #     self.visualize(vis_grids, self.r_goal, disambig_c[k])
             # # self.visualize_traj(r_state, next_r_state, self.r_goal)
         else:
-            self.disambig_R_map = self.curr_sensor_grid.repeat(next_r_state.shape[1],1,1)
+            self.disambig_R_map = self.curr_sensor_grid.repeat(next_r_state.shape[1],1)
             if 'pas' in self.config.robot.policy:
-                self.disambig_R_map = torch.where(self.disambig_R_map==0.5, decoded[0,0], torch.tensor(0.0))
+                self.disambig_R_map = self.decoded_in_unknown.unsqueeze(0) #torch.where(self.disambig_R_map==0.5, decoded[0,0], torch.tensor(0.0))
             disambig_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
             # self.visualize_traj(r_state, next_r_state, self.r_goal)
 
         # TODO: check collision with PaS estimation
-        any_seen_decoded = self.curr_sensor_grid[decoded[0,0]>0.4]==1 # (batch, K, 1)
+        # any_seen_decoded = self.curr_sensor_grid[decoded[0,0]>0.4]==1 # (batch, K, 1)
         # print(torch.any(decoded[0,0]>0.4))
         # print(self.curr_sensor_grid[decoded[0,0]>0.4])
         # print(torch.any(any_seen_decoded))
-
         # Once part of potential occluded_agent is seen in the current timestep, no need to consider PaS_colilsion that is very conservative.
-        if 'pas' in self.config.robot.policy and not torch.any(any_seen_decoded):
-            
+        if 'pas' in self.config.robot.policy and torch.any(decoded_in_unknown):            
             # flatten decoded_in_unknown and its x,y coordinate and obtain the estimated occupancy cells
             decoded_in_unknown_flat = decoded_in_unknown.view(-1)
             decoded_x = self.curr_map_xy[0].view(-1)
@@ -901,7 +930,7 @@ class MPPI_Planner():
                 
                 ## PaS high speed penalty
                 ### Slow down the robot when there's potential occluded obstacle. This keeps the robot goes straight, instead of taking detour. like PaS_collision_cost
-                PaS_collision_c = torch.where(closest_dist_PaS<discomfort_dist*5, # For PaS, make "potential collision" distance is larger due to uncertainty.
+                PaS_collision_c = torch.where(closest_dist_PaS<self.config.reward.discomfort_dist*4, # For PaS, make "potential collision" distance is larger due to uncertainty.
                                             (next_state[...,3])**2*PaS_occupied_prob.max()*0.3,
                                             torch.tensor(0.0))   
                 # PaS_collision_c = torch.tensor(0.0).repeat(r_state.shape[1]).to(self.device)
@@ -925,92 +954,59 @@ class MPPI_Planner():
         potential_c = potential_c.view(-1)
         collision_c = collision_c.view(-1)
         discomfort_c = discomfort_c.view(-1)
+        discomfort_vel_c = discomfort_vel_c.view(-1)
         disambig_c = disambig_c.view(-1)
         PaS_collision_c = PaS_collision_c.view(-1)
         # PaS_discomfort_c = PaS_discomfort_c.view(-1)        
         lane_keeping_c = lane_keeping_c.view(-1)
 
-        cost = goal_reaching_c.float() + potential_c + collision_c.float() + discomfort_c.float() + disambig_c.float() + PaS_collision_c.float() + lane_keeping_c.float() # + PaS_discomfort_c.float()
-        
+        cost = goal_reaching_c.float() + potential_c + collision_c.float() + discomfort_c.float() + discomfort_vel_c.float() + disambig_c.float() + PaS_collision_c.float() + lane_keeping_c.float() # + PaS_discomfort_c.float()
         least_cost_idx = torch.argmin(cost)
-        # if torch.any(potential_c <0):
-        # # if torch.any(disambig_c<0):
-        #     print(potential_c)
-            # print(goal_reaching_c.float(), collision_c.float(), discomfort_c.float())
-            # print(lane_keeping_c, PaS_collision_c, potential_c, disambig_c)
-            # print('least cost:', lane_keeping_c[least_cost_idx], PaS_collision_c[least_cost_idx], potential_c[least_cost_idx], disambig_c[least_cost_idx])
-            # print(goal_reaching_c[least_cost_idx], collision_c[least_cost_idx], discomfort_c[least_cost_idx], disambig_c[least_cost_idx])
-            # pdb.set_trace()        
+        # if torch.any(PaS_collision_c!=0):
+        #     print(PaS_collision_c[PaS_collision_c!=0], lane_keeping_c[PaS_collision_c!=0], potential_c[PaS_collision_c!=0])
+        #     pdb.set_trace()
+        # if torch.any(disambig_c<0):
+        #     print(disambig_c.float())
+        #     print(collision_c.float(), discomfort_c.float(), goal_reaching_c.float(),potential_c.float(), lane_keeping_c.float(), PaS_collision_c.float()) #, disambig_c)
+        #     print('least cost:', disambig_c[least_cost_idx], discomfort_c[least_cost_idx], collision_c[least_cost_idx], potential_c[least_cost_idx])
+            # print(goal_reaching_c[least_cost_idx], collision_c[least_cost_idx], discomfort_c[least_cost_idx], disambig_c[least_cost_idx])     
             
         # ## Visualizing critical disambiguation moments with the disambiguating/nondisambiguating actions labeled.
         # # interest_indices = torch.where(PaS_discomfort_c!=0)[0] #torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[1]
         # # TODO: update both the interest_indices and lowest_cost_ind
-        interest_indices = torch.where(PaS_collision_c!=0)[0]
-        lowest_interest_indices = torch.where(PaS_collision_c==PaS_collision_c.min())[0]
+        if self.disambig_reward_flag:
+            interest_indices = torch.where(disambig_c!=0)[0]
+            lowest_interest_indices = torch.where(disambig_c==disambig_c.min())[0]
+        else:
+            interest_indices = torch.where(PaS_collision_c!=0)[0]
+            lowest_interest_indices = torch.where(PaS_collision_c==PaS_collision_c.min())[0]
         lowest_cost_ind = torch.argmin(cost)
-        # print('disambig_c',disambig_c)
-        # print('lowest cost ind:', lowest_cost_ind)
-        # if torch.any(torch.abs(H_next-self.H_cur)!=0):
-        #     pdb.set_trace()
-        # print(disambig_c, H_next, self.H_cur)
         if len(interest_indices) > 0:
-            
-            # disambig_indices = disambig_indices[1]
-            ## Visualize when the entropy changes.
-            # disambig_indices = torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[0]
-            # for k in disambig_indices:
-            k = 0
+            # for i in range(len(lowest_interest_indices)):
+            # for i in lowest_interest_indices:
+            #     k = i 
+                # interest_indices = np.arange(len(next_label_grid))
+            k = lowest_cost_ind
             curr_map_x, curr_map_y = self.curr_map_xy
             
-            # vis_grids = [[curr_map_x, curr_map_y, next_label_grid[k][0], "Next label grid"]]
-            # vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[k], "Next sensor grid1"])
-            # vis_grids.append([curr_map_x, curr_map_y, disambig_W_map_next[k], "Next disambig W map"])
-            # vis_grids.append([curr_map_x, curr_map_y, disambig_R_map_next[k], "Next disambig R map"])
-            # vis_grids.append([curr_map_x, curr_map_y, decoded[0,0], "Decoded grid"])
-            # vis_grids.append([curr_map_x, curr_map_y, decoded_in_unknown, "Decoded grid in unknown area"])
-            # vis_grids.append([curr_map_x, curr_map_y, self.curr_sensor_grid, "Current sensor grid"])
-            # # visualize_robot_trajectory as well
-            # self.visualize(vis_grids, self.r_goal, disambig_c[k])
+            ## For debugging disambig_c, compare between next disambig R map and current disambig map. 
+            ## Note that next sensor won't show any agent that was invisible at the current time step despite its actual visibility in the future steps.
+            # if self.disambig_reward_flag:
+            #     vis_grids = [[curr_map_x, curr_map_y, gt_next_label_grid[k][0], "Next label grid"]]
+            #     vis_grids.append([curr_map_x, curr_map_y, gt_next_sensor_grid[k], "Next sensor grid (w gt label)"])
+            #     vis_grids.append([curr_map_x, curr_map_y, disambig_W_map_next[k], "Next disambig W map"])
+            #     vis_grids.append([curr_map_x, curr_map_y, disambig_R_map_next[k], "Next disambig R map"])
+            #     vis_grids.append([curr_map_x, curr_map_y, decoded[0], "Decoded grid"])
+            #     vis_grids.append([curr_map_x, curr_map_y, decoded_in_unknown, "Decoded grid in unknown area"])
+            #     vis_grids.append([curr_map_x, curr_map_y, self.curr_sensor_grid, "Current sensor grid"])
+            #     vis_grids.append([curr_map_x, curr_map_y, self.disambig_R_map[k], "Current disambig R map" ])
+            #     # visualize_robot_trajectory as well
+            #     self.visualize(vis_grids, self.r_goal, disambig_c[k])
             
-            cur_h_states = ob[0, [0], t, :, :2] # (1, human_num, 2)
-            self.visualize_disambig_traj(r_state, next_r_state, self.r_goal, interest_indices, self.curr_map_xy, self.curr_sensor_grid, wall_polygons, cur_h_states, lowest_interest_indices, lowest_cost_ind, cost)
-            # pdb.set_trace()
+            # cur_h_states = ob[0, [0], t, :, :2] # (1, human_num, 2)
+            # # self.visualize_disambig_traj(r_state[:, [k]], next_r_state[:, [k]], self.r_goal, interest_indices, self.curr_map_xy, gt_next_sensor_grid[k], wall_polygons, cur_h_states, lowest_interest_indices, lowest_cost_ind, cost)
+            # self.visualize_disambig_traj(r_state, next_r_state, self.r_goal, interest_indices, self.curr_map_xy, self.curr_sensor_grid, wall_polygons, cur_h_states, lowest_interest_indices, lowest_cost_ind, cost[k])
         
-        
-        # discomfort_indices = torch.where(torch.logical_and(discomfort_c> 0,collision_c==0.))[1]
-        # print(discomfort_c, dmin.values+ hr+r_radius, discomfort_dist)
-        # if len(discomfort_indices) > 0:
-        #     pdb.set_trace()
-        #     # disambig_indices = disambig_indices[1]
-        #     ## Visualize when the entropy changes.
-        #     # disambig_indices = torch.where(torch.logical_and(torch.abs(H_next-self.H_cur) > 0,collision_c==0.))[0]
-        #     for k in discomfort_indices:
-        #         curr_map_x, curr_map_y = self.curr_map_xy
-        #         vis_grids = [[curr_map_x, curr_map_y, next_label_grid[k][0], "Next label grid"]]
-        #         vis_grids.append([curr_map_x, curr_map_y, next_sensor_grid[k], "Next sensor grid"])
-        #         vis_grids.append([curr_map_x, curr_map_y, disambig_W_map_next[k], "Next disambig W map"])
-        #         vis_grids.append([curr_map_x, curr_map_y, disambig_R_map_next[k], "Next disambig R map"])
-        #         vis_grids.append([curr_map_x, curr_map_y, decoded[0,0], "Decoded grid"])
-        #         vis_grids.append([curr_map_x, curr_map_y, decoded_in_unknown, "Decoded grid in unknown area"])
-        #         vis_grids.append([curr_map_x, curr_map_y, self.curr_sensor_grid, "Current sensor grid"])
-        #         # visualize_robot_trajectory as well
-        #         self.visualize(vis_grids, self.r_goal, disambig_c[k])
-            
-        #     self.visualize_disambig_traj(r_state, next_r_state, self.r_goal, discomfort_indices, self.curr_map_xy, self.curr_sensor_grid)
-        #     pdb.set_trace()
-        
-        # pdb.set_trace()
-        # print('t:', t, 'cost', cost[torch.where(disambig_c>0)], 'goal', goal_reaching_c[torch.where(disambig_c>0)], 'potential', potential_c[torch.where(disambig_c>0)], 'collision', collision_c[torch.where(disambig_c>0)], 'discomfort', discomfort_c[torch.where(disambig_c>0)], 'disambig', disambig_c[torch.where(disambig_c>0)])
-        
-        # if torch.any(disambig_c != 0) or torch.any(discomfort_c > 0) or torch.any(collision_c>0):
-        #     mask = torch.where(torch.logical_or(discomfort_c>0, collision_c>0))
-        #     print('goal',goal_reaching_c[mask], 'potent',potential_c[mask], 'colli',collision_c[mask], 'discomfort',discomfort_c[mask], 'disambig', disambig_c[mask])
-        # self.next_map_xy = next_map_xy
-        # self.next_sensor_grid = next_sensor_grid
-        # if self.step == 40:
-        #     self.costs.append(cost)
-            # if len(self.costs)>self.lookahead_steps-1:
-            #     pdb.set_trace()            
         return cost
     
     def plan(self, obs, decoded, wall_polygons, config):

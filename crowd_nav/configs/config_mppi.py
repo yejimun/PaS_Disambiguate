@@ -65,7 +65,8 @@ class Config(object):
     robot.v_pref = 2 #2 # 0.5 for the turtlebot experiment
     robot.sensor = "coordinates"
     # FOV = this values * PI
-    robot.FOV = 2.
+    robot.FOV = 2. # radius of the FOV
+    robot.disambig_angle = 0.5
     robot.FOV_radius = 3.0
     robot.limited_path = False  
     robot.onedim_action = False 

@@ -211,6 +211,7 @@ class CrowdSim(gym.Env):
             elif self.sim == "entering_room":
                 occluded_from_left = np.random.random() > 0.5
                 self.humans.append(self.generate_entering_room_human(len(self.humans), occluded_from_left))
+                self.wall_polygons = [np.array([[-1., 0.3], [-6, 0.3],[-6, -0.3], [-1., -0.3]]), np.array([[6., 0.3], [1., 0.3], [1., -0.3], [6., -0.3]])]
             elif self.sim == "static_human_behindWall":
                 occluded_from_left = np.random.random() > 0.5
                 self.humans.append(self.generate_staticHuman_behindWall(len(self.humans), occluded_from_left))
@@ -229,32 +230,32 @@ class CrowdSim(gym.Env):
         
         if human_id <1: # reference humans
             px = 0. #(-1)**human_id*1.5
-            py = (-3.5 + np.random.random()*0.2)
+            py = (-3.0 + np.random.random()*0.2)
             gx = 0.0
             gy = 7.0
             human.set(px, py, gx, gy, 0, 0, 0, v_pref=self.config.humans.v_pref)
             # print('human0 initial px,py:', px, py)
         elif human_id >=1 and human_id < 2: # occluded humans
             if occluded_from_left:
-                px = -(5. + (-1.)**np.random.choice([0,1])*np.random.random()*0.2) #if human_id == 1. else -(7. + np.random.random()*0.2)
+                px = -(3.3 + (-1.)**np.random.choice([0,1])*np.random.random()*0.2) #if human_id == 1. else -(7. + np.random.random()*0.2)
             else:
-                px = 5.+(-1.)**np.random.choice([0,1])*np.random.random()*0.2  #if human_id == 1. else (7.+np.random.random()*0.2)
-            py = 1.2 + (human_id-1) * 2.
+                px = 3.3+(-1.)**np.random.choice([0,1])*np.random.random()*0.2  #if human_id == 1. else (7.+np.random.random()*0.2)
+            py = 0.6 #+ (human_id-1) * 2
             v_pref = self.config.humans.v_pref if np.random.random() < 0.5 else 0
-            human.set(px, py, -px, py, 0, 0, 0,v_pref=v_pref)
+            human.set(px, py, -px, py, 0, 0, 0,v_pref=v_pref*0.5)
             # print('human1 initial px,py:', px,py)
             
-        elif human_id>=2 and human_id<6 : # left static humans
-            h_radius = 0.5
-            px = -6 + (human_id-2)*h_radius*2 + h_radius
-            py = 0.0
-            human.set(px, py, px, py, 0, 0, 0, radius=h_radius,v_pref=0)
+        # elif human_id>=2 and human_id<6 : # left static humans
+        #     h_radius = 0.5
+        #     px = -6 + (human_id-2)*h_radius*2 + h_radius
+        #     py = 0.0
+        #     human.set(px, py, px, py, 0, 0, 0, radius=h_radius,v_pref=0)
             
-        elif human_id >=6 and human_id < 10: # right static humans
-            h_radius = 0.5
-            px = 2. + (human_id-6)*h_radius*2 + h_radius
-            py = 0.0
-            human.set(px, py, px, py, 0, 0, 0, radius=h_radius,v_pref=0)
+        # elif human_id >=6 and human_id < 10: # right static humans
+        #     h_radius = 0.5
+        #     px = 2. + (human_id-6)*h_radius*2 + h_radius
+        #     py = 0.0
+        #     human.set(px, py, px, py, 0, 0, 0, radius=h_radius,v_pref=0)
 
         return human
     
@@ -419,6 +420,7 @@ class CrowdSim(gym.Env):
             if human_visibility[i]:
                 humanS = np.array(self.humans[i].get_observable_state_list())
                 self.last_human_states[i, :] = humanS
+                # print('human',i, np.linalg.norm(humanS[2:4]))
 
             else:
                 if reset:
@@ -431,6 +433,7 @@ class CrowdSim(gym.Env):
                     px = px + vx * self.time_step
                     py = py + vy * self.time_step
                     self.last_human_states[i, :] = np.array([px, py, vx, vy, r])
+                    # print('human',i, np.linalg.norm([vx,vy]))
 
 
 
@@ -451,7 +454,7 @@ class CrowdSim(gym.Env):
                 px, py = 2.0, -4.0
                 gx, gy = 0.0, -py
             elif self.sim == 'entering_room' or self.sim == 'static_human_behindWall':
-                px, py = 0.0, -5.0
+                px, py = 0.0, -5.
                 gx, gy = 0.0, 5.0
             if np.linalg.norm([px - gx, py - gy]) >= 4: #8:
                 break
