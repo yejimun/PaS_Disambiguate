@@ -48,11 +48,11 @@ class CrowdSimDict(CrowdSim):
             robot_vec_length = 9
             self.partial_visibility = False
         else:
-            # if self.config.action_space.kinematics=="holonomic":
-            robot_vec_length = 4
             self.partial_visibility = True
-            # else:
-            #     robot_vec_length = 5
+            if self.config.action_space.kinematics=="holonomic":
+                robot_vec_length = 4
+            else:
+                robot_vec_length = 5
         d={}         
         if self.collectingdata: 
             vec_length = robot_vec_length+5*self.human_num
@@ -63,18 +63,18 @@ class CrowdSimDict(CrowdSim):
         elif self.config.robot.policy =='pas_rnn' or self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
                 d['vector'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, robot_vec_length,), dtype = np.float32)  
                 
-        if (self.collectingdata and 'mppi' in self.config.robot.policy) or not self.collectingdata:
+        if (self.collectingdata and 'mppi' in self.config.robot.policy) and not self.collectingdata:
             if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
                 full_sequence = self.config.pas.sequence + self.config.diffstack.lookahead_steps
                 d['mppi_vector'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(full_sequence, 1+self.human_num, 7), dtype = np.float32)
-            ## TODO: make the grid shape to sequence + future once the fast ray tracing is implemented              
-            if self.config.pas.seq_flag or self.config.pas.encoder_type != 'cnn' :
-                d['grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.config.pas.sequence, *self.grid_shape), dtype = np.float32) 
-                d['label_grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2, *self.grid_shape), dtype = np.float32) 
-            else:
-                d['grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, *self.grid_shape), dtype = np.float32)
             d['vis_ids'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.config.pas.sequence, self.human_num,), dtype = np.float32)
             d['grid_xy'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2, *self.grid_shape), dtype = np.float32)
+        ## TODO: make the grid shape to sequence + future once the fast ray tracing is implemented              
+        if self.config.pas.seq_flag or self.config.pas.encoder_type != 'cnn' :
+            d['grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.config.pas.sequence, *self.grid_shape), dtype = np.float32) 
+            d['label_grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(2, *self.grid_shape), dtype = np.float32) 
+        else:
+            d['grid'] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1, *self.grid_shape), dtype = np.float32)
         self.observation_space=gym.spaces.Dict(d)
 
         if self.config.robot.policy == 'pas_diffstack' or 'mppi' in self.config.robot.policy:
@@ -164,17 +164,17 @@ class CrowdSimDict(CrowdSim):
         elif self.config.pas.gridtype == 'local':
             # self.px, self.py, self.vx, self.vy, self.radius, self.gx, self.gy, self.v_pref, self.theta
             robot_state_np = np.array(self.robot.get_full_state_list()).copy()
-            # if self.robot.kinematics == 'holonomic':               
-            robot_vector = np.zeros(4)
-            robot_vector[:2] = robot_state_np[:2]-robot_state_np[5:7]
-            robot_vector[2:4] = robot_state_np[2:4]
-            ob['vector'] = robot_vector  # (px-gx, py-gy, vx, vy)     
-            # else: 
-            #     robot_vector = np.zeros(5) 
-            #     robot_vector[:5] = robot_state_np[:5]
-            #     robot_vector[:2] = deepcopy(robot_state_np[:2]-robot_state_np[5:7])
-            #     robot_vector[-1] = robot_state_np[-1]                    
-            #     ob['vector'] = robot_vector # unicycle # (px-gx, py-gy, vx, vy, w) -> Still converged to vx, vy from theta, v
+            if self.robot.kinematics == 'holonomic':               
+                robot_vector = np.zeros(4)
+                robot_vector[:2] = robot_state_np[:2]-robot_state_np[5:7]
+                robot_vector[2:4] = robot_state_np[2:4]
+                ob['vector'] = robot_vector  # (px-gx, py-gy, vx, vy)     
+            else: 
+                robot_vector = np.zeros(5) 
+                robot_vector[:5] = robot_state_np[:5]
+                robot_vector[:2] = deepcopy(robot_state_np[:2]-robot_state_np[5:7])
+                robot_vector[-1] = robot_state_np[-1]                    
+                ob['vector'] = robot_vector # unicycle # (px-gx, py-gy, vx, vy, w) -> Still converged to vx, vy from theta, v
                 
         if 'mppi' in self.config.robot.policy:
             ob['mppi_vector'] = np.array(self.states_list[-self.config.pas.sequence:] + lookahead_states) # (sequence+lookahead_steps,1+n_humans, 7) )
@@ -473,137 +473,46 @@ class CrowdSimDict(CrowdSim):
             p1x,p1y = p2x,p2y
         return inside
     
-    def transfer_grid_data(self, curr_xy, curr_grids, next_xy, next_grids, distance_threshold=0.1, batch_chunk_size=1):
-        """
-        Transfers data from curr_grids to next_grids based on coordinate mapping
-        from curr_xy (ego grid) to next_xy (map grid) only if the coordinates are within
-        a specified distance threshold.
-        
-        
-        Arguments:
-        curr_xy = [[B,H,W], [B,H,W]]   
-        curr_grids = [B,H,W] 
-        next_xy = [[H,W], [H,W]]
-        next_grids = [H,W]
-        distance_threshold -- A float specifying the maximum distance for considering two points a match.
-
-        Returns:
-        Updated grids with the transferred data from next_grids.
-        """
-        # next_grids = next_grids.squeeze(0) # (1, batch_size, H, W) -> (batch_size, H, W)
-        # curr_grids = curr_grids.squeeze(0) # (1, batch_size, H, W) -> (batch_size, H, W)
-        B, H, W = curr_grids.shape
-        
-        # Initialize result tensor for updated pred_maps
-        updated_grids = np.ones_like(curr_grids)*0.5
-        
-        next_xy_stacked = next_xy.transpose(1,2, 0)  # (H, W, 2)
-        curr_xy_stacked = np.stack(curr_xy).transpose(1,2,0).reshape(B,H,W,2)  # (B, H, W, 2)
-        # # Compute pairwise distances between next_xy and curr_xy
-        # # (H*W, B, 2)-(H*W, 1, 2) = (H*W, B, 1)
-        # pdb.set_trace()
-        
-        # dists = torch.cdist(curr_xy_stacked.view(B, -1,2).transpose(1,0,2),next_xy_stacked.view(-1, 2) .unsqueeze(1), p=2)  # (H*W, B, 1)
-        next_xy_flat = next_xy_stacked.reshape(-1, 2)  # (H*W, 2)
-        kdtree = cKDTree(next_xy_flat)
-            
-        # Process the batches in chunks to avoid memory overflow
-        for start in range(0, B, batch_chunk_size):
-            end = min(start + batch_chunk_size, B)
-
-            # Extract the chunk of batches
-            curr_grids_chunk = curr_grids[start:end]  # Shape: (batch_chunk_size, H_map, W_map)
-            curr_xy_chunk = curr_xy_stacked[start:end]  # Shape: (batch_chunk_size, H_map, W_map, 2)
-            curr_xy_chunk_flat = curr_xy_chunk.reshape(end-start, -1, 2)  # (batch_chunk_size, H_map*W_map, 2)
-
-            # Flatten the grid coordinates for efficient index mapping
-            curr_xy_flat = curr_xy_chunk.reshape(end-start, -1, 2)  # (batch_chunk_size, H_map*W_map, 2)
-            
-            distances, indices = kdtree.query(curr_xy_chunk_flat[0], distance_upper_bound=distance_threshold)  # (batch_chunk_size, H*W)
-            mask = distances <= distance_threshold 
-
-            # Using the mask, transfer the values in parallel
-            curr_grids_flat = curr_grids_chunk.reshape(end-start, -1) # Flatten curr_grids to (batch_chunk_size, H_map*W_map)
-
-            next_indices = indices[mask]
-            # print(curr_xy_chunk.shape, curr_grids.shape, start, end)
-            curr_indices = np.arange(H*W)[mask]
-            
-            updated_grids[start:end].reshape(-1)[next_indices] = curr_grids_flat.reshape(-1)[curr_indices]
-
-        return updated_grids
-
-
-    def Transfer_to_EgoGrid(self,curr_xy, curr_grids, next_xy, next_grids, res):
-        # global x_min, x_max, y_min, y_max
-        ###############################################################################################################################
-        ## Goal : Transfer pred_maps (in sensor/reference car's grid) cell information to the unknown cells of ego car's sensor_grid
-        ## Method : Used global grid as an intermediate (ref indx --> global indx --> ego indx)
-        ## return updated_next_grids(N, w', h')
-        ## * N : number of agents
-        ## * The resolution of global grid should be a little bigger than the local grid's. Else there can be some missing information.
-        ###############################################################################################################################
-        
-        x_min = -6
-        x_max = 6
-        y_min = -6
-        y_max = 6
-
-        global_res = 0.1  #0.2
-        global_grid_x, global_grid_y = global_grid(np.array([x_min,y_min]),np.array([x_max,y_max]),global_res)
-
-        x_min = np.min(global_grid_x)
-        x_max = np.max(global_grid_x)
-        y_min = np.min(global_grid_y)
-        y_max = np.max(global_grid_y)
-        
-        # pred_maps_egoGrid = [] # pred_maps in ego grid
-
-        curr_grids_ = deepcopy(curr_grids)
-        # pred_egoGrid = copy.copy(ego_sensor_grid) 
-        updated_next_grids = self.transfer_grid_data(curr_xy, curr_grids_, next_xy, next_grids ,distance_threshold=global_res)
-        # pred_maps_egoGrid = mask_in_EgoGrid(global_grid_x, global_grid_y, ref_local_xy, ego_xy, pred_egoGrid, pred_maps, global_res)
-        # pred_maps_egoGrid.append(pred_egoGrid)
-
-        return updated_next_grids
-
-
-    def disambig_mask(self, grid_xy, robot_pos, goal, decoded_in_unknown, grid_res):
+    def disambig_mask(self, grid_xy, robot_pos, goal, decoded_in_unknown, grid_res, disambig_angle):
         """
         Mask the grid to disambiguate the robot's path towards the goal. 
         The mask is a 120 degree cone towards the goal.
         """
-        K = len(robot_pos)
-        H, W = grid_xy[0].shape
+
         # kernel_max = 0.5
-        sigma = 0.1
+        # sigma = 0.1
         
-        disambig_weight_map = np.ones((K, H, W))
+        disambig_weight_map = np.ones_like(decoded_in_unknown)
         
-        # Obtain rays for the robot towards the goal direction with 90 degree FOV
-        heading = np.arctan2(goal[1]-robot_pos[:,1], goal[0]-robot_pos[:,0]) # (K,)
-        FOV_angle = math.pi/3*2 #np.asin(np.clip(human_radius/np.sqrt((center[:,1]-r_pos[:,1])**2 + (center[:,0]-r_pos[:,0])**2), -1., 1.)) # (K,)
+        # # Obtain rays for the robot towards the goal direction with 90 degree FOV
+        # heading = np.arctan2(goal[1]-robot_pos[:,1], goal[0]-robot_pos[:,0]) # (K,)
+        # FOV_angle = math.pi/3*2 #np.asin(np.clip(human_radius/np.sqrt((center[:,1]-r_pos[:,1])**2 + (center[:,0]-r_pos[:,0])**2), -1., 1.)) # (K,)
         
-        # # Mask points from grid_xy
-        x1 = robot_pos[:,0] + 20 * np.cos(heading-FOV_angle/2.) # (K,)
-        y1 = robot_pos[:,1] + 20 * np.sin(heading-FOV_angle/2.) # (K,)
+        # # # Mask points from grid_xy
+        # x1 = robot_pos[:,0] + 20 * np.cos(heading-FOV_angle/2.) # (K,)
+        # y1 = robot_pos[:,1] + 20 * np.sin(heading-FOV_angle/2.) # (K,)
         
-        x2 = robot_pos[:,0] + 20 * np.cos(heading+FOV_angle/2.) # (K,)
-        y2 = robot_pos[:,1] + 20 * np.sin(heading+FOV_angle/2.) # (K,)
+        # x2 = robot_pos[:,0] + 20 * np.cos(heading+FOV_angle/2.) # (K,)
+        # y2 = robot_pos[:,1] + 20 * np.sin(heading+FOV_angle/2.) # (K,)
         
-        polygon = np.stack([np.stack([x1, y1], axis=1), np.stack([x2, y2], axis=1), robot_pos], axis=1) # (K, 2, 2)
-        grid_x = grid_xy[[0]].reshape(K, -1)
-        grid_y = grid_xy[[1]].reshape(K, -1)
-        disambig_mask = self.pointinpolygon(grid_x,grid_y,polygon.transpose(1,0,2)) # (K, H, W)
-        disambig_mask = disambig_mask.reshape(K, H, W)
+        # polygon = np.stack([np.stack([x1, y1], axis=1), np.stack([x2, y2], axis=1), robot_pos], axis=1) # (K, 2, 2)
+        # grid_x = grid_xy[[0]].reshape(K, -1)
+        # grid_y = grid_xy[[1]].reshape(K, -1)
+        # disambig_mask = self.pointinpolygon(grid_x,grid_y,polygon.transpose(1,0,2)) # (K, H, W)
+        # disambig_mask = disambig_mask.reshape(K, H, W)
         
-        disambig_weight_map[~disambig_mask] = 0.
+        # disambig_weight_map[~disambig_mask] = 0.
+        
+        ## (2) Half plane mask towards the goal in y axis.
+        disambig_mask = np.ones_like(decoded_in_unknown)
+        disambig_mask = disambig_mask * (grid_xy[1] - robot_pos[:,1] > 0).reshape(disambig_mask.shape) # (1, H, W)
+        disambig_weight_map[~disambig_mask.astype(bool)] = 0.
         
         return disambig_weight_map        
 
 
 
-    def compute_disambig_cost(self, robot_pos, grid_xy, sensor_grid, next_sensor_grid, decoded_in_unknown, goal, config):
+    def compute_disambig_entropy(self, robot_pos, grid_xy, sensor_grid, next_sensor_grid, decoded_in_unknown, goal, config):
         """
         For each cell, H(p) = -plogp -(1-p)log(1-p)
         The disambiguation cost is computed on towards the goal direction of the robot with 120 degree cone shaped mask.
@@ -616,19 +525,21 @@ class CrowdSimDict(CrowdSim):
         grid_res = config.pas.grid_res
         grid_shape = [config.pas.grid_width, config.pas.grid_height] 
         disambig_method = config.reward.disambig_method
+        disambig_angle = config.robot.disambig_angle*np.pi
         
-        disambig_weight_map = self.disambig_mask(grid_xy,robot_pos, goal, decoded_in_unknown, grid_res)
+        disambig_weight_map = self.disambig_mask(grid_xy,robot_pos, goal, decoded_in_unknown, grid_res, disambig_angle)
 
         # Calculate the uncertainty reward
         ## Obtain the unobserved area in both current and next sensor grid and set them to 0.5. Otherwise, 0 for both observed free and occupied cells.
-        integrated_sensor = np.zeros(sensor_grid.shape)#.to(decoded_in_unknown.dtype)
-        integrated_sensor[np.logical_and(sensor_grid==0.5, next_sensor_grid==0.5)] = 0.5
+        integrated_sensor = np.zeros(next_sensor_grid.shape)#.to(decoded_in_unknown.dtype)
+        unexplored_aream_mask = np.logical_and(sensor_grid==0.5, next_sensor_grid==0.5)
     
         ## Transfer the PaS estimation to the unknown area of the integrated unknown grid
         # print('integrated', 'decoded',integrated_sensor.shape, decoded_in_unknown.shape)
-        integrated_sensor[integrated_sensor==0.5] = decoded_in_unknown[integrated_sensor==0.5] 
-        zero_mask = integrated_sensor==0.
+        integrated_sensor[unexplored_aream_mask] = decoded_in_unknown[unexplored_aream_mask] 
+        # zero_mask = integrated_sensor==0.
 
+        # print('integrated_sensor', integrated_sensor.shape, decoded_in_unknown.shape, disambig_weight_map.shape)
         integrated_sensor = integrated_sensor * disambig_weight_map * 0.5 # Making the estimated occupancy the most uncertain.
         disambig_reward_map = -integrated_sensor*np.log(integrated_sensor)-(1-integrated_sensor)*np.log(1-integrated_sensor) #(~zero_mask) # integrated_sensor == 0. or 1. is nan
         disambig_reward_map[np.isnan(disambig_reward_map)] = 0. # make nan to 0.
@@ -641,13 +552,18 @@ class CrowdSimDict(CrowdSim):
     def step(self, action, decoded=None):
         """
         Compute actions for all agents, detect collision, update environment and return (ob, reward, done, info)
+        decoded: (1, H, W)
         """
         
         r_pos = np.array([[self.robot.px,self.robot.py]])
         if self.config.reward.disambig_reward_flag and self.config.robot.policy == 'pas_rnn':
-            decoded_in_unknown = np.where(self.curr_sensor_grid==0.5, decoded[0,0], 0.0).reshape(1, *self.grid_shape)
+            ## Using the observation before action
+            decoded_in_unknown = deepcopy(decoded)
+            decoded_in_unknown[self.curr_sensor_grid!=0.5]=0.
+            ## TODO: maybe supress values under 0.4 as well??
             r_goal = np.array([self.robot.gx, self.robot.gy])
-            self.H_cur, self.disambig_R_map, self.disambig_W_map = self.compute_disambig_cost(r_pos, self.curr_map_xy, self.curr_sensor_grid, self.curr_sensor_grid, decoded_in_unknown, r_goal, self.config)
+            H_cur, disambig_R_map, disambig_W_map = self.compute_disambig_entropy(r_pos, self.curr_map_xy, self.curr_sensor_grid, self.curr_sensor_grid, decoded_in_unknown, r_goal, self.config)
+
             
         if np.all(action==[-99., -99.]) or np.all(action==[-99.]): 
             # Input dummy action values for data collection. To use ORCA planner for robot 
@@ -703,27 +619,58 @@ class CrowdSimDict(CrowdSim):
         for i, human_action in enumerate(human_actions):
             self.humans[i].step(human_action)
             
-        reward, done, episode_info = self.calc_reward(action)     
-            
+        reward, done, episode_info = self.calc_reward(action)   
                 
         self.global_time += self.time_step # max episode length=time_limit/time_step
 
         # compute the observation
         ob = self.generate_ob(reset=False)
         
-        if self.config.reward.disambig_reward_flag and self.config.robot.policy == 'pas_rnn':
-            next_empty_grid = np.zeros_like(self.curr_sensor_grid)[[-1]]
-            ## TODO: make the untransferred areas to be unknown (0.5) in the transferred grid?
-            transferred_next_sensor_grid = self.Transfer_to_EgoGrid(ob['grid_xy'],ob['grid'][[-1]], self.curr_map_xy, next_empty_grid, self.grid_res) # decoded in next time (t=1)              
-            r_pos = np.array([[self.robot.px,self.robot.py]])
-            H_next, disambig_R_map_next, disambig_W_map_next = self.compute_disambig_cost(r_pos, self.curr_map_xy, transferred_next_sensor_grid, self.curr_sensor_grid, decoded_in_unknown, r_goal, self.config)
-
-            disambig_c = (H_next-self.H_cur) * self.config.reward.disambig_factor  # -(-H_next+H_cur) # torch.clamp(H_next-H_cur,min=0.0) 
-            
-            ## disambig_c added to the reward
-            reward += np.any(disambig_c>0) * self.config.reward.disambig_factor  
         
+        disambig_r = 0.0
+        PaS_collision_r = 0.0
+        
+        if self.config.reward.disambig_reward_flag and self.config.robot.policy == 'pas_rnn': # Disambiguating action can be used for both with and without PaS.
+            r_pos_next = np.array([[self.robot.px,self.robot.py]])
+            H_next, disambig_R_map_next, disambig_W_map_next = self.compute_disambig_entropy(r_pos_next, self.curr_map_xy, self.curr_sensor_grid,deepcopy(ob['grid'][[-1]]), decoded_in_unknown, r_goal, self.config)
 
+            disambig_r = -(H_next-H_cur) * self.config.reward.disambig_factor  # -(-H_next+H_cur) # torch.clamp(H_next-H_cur,min=0.0) 
+            disambig_r = disambig_r[0] * self.config.reward.disambig_factor if disambig_r>0 else 0.0
+            disambig_r = max(disambig_r, 10.)
+            # print('H_next', H_next)
+            # print('H_cur', H_cur)
+            
+        if self.config.reward.disambig_reward_flag and self.config.robot.policy == 'pas_rnn' and self.config.pas.encoder_type=='vae' and np.any(decoded_in_unknown): # PaS_collision_r can be used for only PaS.
+            decoded_in_unknown_flat = decoded_in_unknown.reshape(-1)
+            decoded_x = self.curr_map_xy[0].reshape(-1)
+            decoded_y = self.curr_map_xy[1].reshape(-1)
+            
+            PaS_occupied_indices = np.where(decoded_in_unknown_flat>0.4)
+            if len(PaS_occupied_indices[0])>0:
+                PaS_occupied_xy = np.stack([decoded_x[PaS_occupied_indices], decoded_y[PaS_occupied_indices]], axis=1)
+                PaS_occupied_prob = decoded_in_unknown_flat[PaS_occupied_indices]
+                
+                # compute collision cost for PaS occupied cells.
+                dist_to_PaS_occupied = np.linalg.norm(PaS_occupied_xy - np.array([self.robot.px, self.robot.py]), axis=1)
+                dmin_to_PaS_occupied = np.min(dist_to_PaS_occupied) #(1,)
+                # dmin_PaS_indices = dmin_to_PaS_occupied.indices
+                
+                closest_dist_PaS = dmin_to_PaS_occupied - self.robot.radius
+                
+                ### PaS collision penalty: high speed penalty in the existence of potential occluded humans.
+                # TODO: update the cost name to PaS_discomfort_c
+                if closest_dist_PaS<self.config.reward.discomfort_dist*4:
+                    if self.robot.kinematics == 'unicycle':
+                        PaS_collision_r = -action.v**2*PaS_occupied_prob.max()*0.4 #0.3
+                    else: # holonomic
+                        PaS_collision_r = -np.linalg.norm([action.vx, action.vy])**2*PaS_occupied_prob.max()*0.03 #0.3
+            
+                    
+        reward += disambig_r + PaS_collision_r
+        # PaS_collision_r: -1.6~0; -(2^2*1*0.4)=1.6 =robot_v^2*PaS_prob*coef # (Should be larger than potential_r)
+                    
+        # print('r2',disambig_r, PaS_collision_r)
+            
         if self.robot.kinematics == 'unicycle' and self.config.robot.policy != 'pas_mppi':    
             ob['vector'][3:5] =  np.array(action)      # (2, N+1, )   
             
@@ -742,8 +689,8 @@ class CrowdSimDict(CrowdSim):
                     self.update_human_goal(human, i=i)
                     
         if self.config.reward.disambig_reward_flag and self.config.robot.policy == 'pas_rnn':
-            self.curr_sensor_grid = deepcopy(ob['grid'][[-1]])
-            self.curr_map_xy = deepcopy(np.array(ob['grid_xy'])).reshape(2, *self.grid_shape)
+            self.curr_sensor_grid = deepcopy(ob['grid'][[-1]]) # (1, H, W)
+            self.curr_map_xy = deepcopy(np.array(ob['grid_xy'])).reshape(2, *self.grid_shape)   
         return ob, reward, done, info    
     
     def lookahead_step(self, robot_states, human_states, lookahead_steps=1.0):

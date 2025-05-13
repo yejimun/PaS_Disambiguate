@@ -727,6 +727,18 @@ class CrowdSim(gym.Env):
                 break
             elif closest_dist < dmin:
                 dmin = closest_dist
+                
+        if not collision: 
+            ## Add collision with rectangle walls 
+            ## !! only support rectangles walls for now.
+            r_radius = self.robot.radius
+            for wall in self.wall_polygons:
+                xmin, xmax, ymin, ymax = wall[:,0].min(), wall[:,0].max(), wall[:,1].min(), wall[:,1].max()
+                xmin, xmax, ymin, ymax = xmin-r_radius, xmax+r_radius, ymin-r_radius, ymax+r_radius
+                collision_flag = (self.robot.px>=xmin)*(self.robot.px<=xmax) * (self.robot.py>=ymin)*(self.robot.py<=ymax)
+                if collision_flag:
+                    collision = True
+                    break            
 
         # check if reaching the goal
         if self.sim == 'static_obstacles':
@@ -759,42 +771,66 @@ class CrowdSim(gym.Env):
             reward = self.success_reward
             done = True
             episode_info = ReachGoal()
-
-        elif dmin < self.discomfort_dist:
-            # only penalize agent for getting too close if it's visible
-            reward =  (dmin - self.discomfort_dist) * self.discomfort_penalty_factor * self.time_step
-            done = False
-            episode_info = Danger(dmin)
-
+            
         else:
             potential_cur = np.linalg.norm(
                 np.array([self.robot.px, self.robot.py]) - np.array(self.robot.get_goal_position()))
-            reward = 2 * (-abs(potential_cur) - self.potential) 
+            potential_r = 2 * (-abs(potential_cur) - self.potential) 
             # print(2 * (-abs(potential_cur) - self.potential) )
             self.potential = -abs(potential_cur)
-            
-            if self.disambig_reward_flag:  
-                ## TODO : should be changed to self.prev_disambig_reward - self.disambig_reward
-                reward += self.disambig_reward
-                # print('uncertainty reward', self.disambig_reward)
 
+            if dmin < self.discomfort_dist:
+                # only penalize agent for getting too close if it's visible
+                discomfort_r =  (dmin - self.discomfort_dist) * self.discomfort_penalty_factor * self.time_step
+                done = False
+                episode_info = Danger(dmin)
+                                
+                ## disambiguation test: slow down the robot when there's human in discomfort distance.
+                if self.robot.kinematics == 'unicycle':
+                    discomfort_vel_r = -action.v**2*0.5 # 0.3
+                else:
+                    discomfort_vel_r = -np.linalg.norm([action.vx, action.vy])**2*0.03 # 0.3
+            else:
+                discomfort_r = 0.
+                discomfort_vel_r = 0.
+            ### Lane keeping cost
+            # penalize if the robot deviates from the lane (x-=0)
+            # lane_keeping_r = max(-self.robot.px**2*1.5, -2.)  # *5 ## TODO: minimum needs to be tuned
+            
+            spin_r = -action.r**2*0.5
+            
+            reward = potential_r + discomfort_r + spin_r + discomfort_vel_r #+ lane_keeping_r
+            # potential_r: -1~1; 2x2x0.25 = 1 = coef x robot.v_pref x time_step
+            # discomfort_r: -1.25~0; -0.5x10x0.25 = -1.25 = discomfort_dist x discomfort_penalty_factor x time_step
+            # discomfort_vel_r: -2~0  ; -(-2^2x0.5)=-2=v_pref^2*coef (Should be larger than potential_r)
+            # lane_keeping_r: -2~0  ; -(1^2*1.5)= -1.5 = reasonable robot_px^2xcoef (Should be larger than discomfort_r)
+            # print('r', potential_r, discomfort_r) #, discomfort_vel_r, lane_keeping_r)
+                
+            if self.config.reward.disambig_reward_flag and self.config.robot.policy == 'pas_rnn':
+                ### Disambig reward is added in step() of crowd_sim_dict.py
+                pass
+            if self.config.reward.disambig_reward_flag and self.config.robot.policy == 'pas_rnn':
+                ### PaS_collision_cost is added in step() of crowd_sim_dict.py
+                pass                
 
             done = False
             episode_info = Nothing()
+            
+            
+        
 
-        # This code is for turtlebot experiment. Comment out for simulation
-        # if the robot is near collision/arrival, it should be able to turn a large angle
-        if self.robot.kinematics == 'unicycle' and not self.collectingdata and self.config.robot.policy != 'pas_mppi':
-            # add a rotational penalty
-            r_spin = -2 * action.r**2
+        # # TODO: This code is for turtlebot experiment. Comment out for simulation
+        # # if the robot is near collision/arrival, it should be able to turn a large angle
+        # if self.robot.kinematics == 'unicycle' and not self.collectingdata and self.config.robot.policy != 'pas_mppi':
+        #     # add a rotational penalty
+        #     r_spin = -2 * action.r**2
 
-            # add a penalty for going backwards
-            if action.v < 0:
-                r_back = -2 * abs(action.v)
-            else:
-                r_back = 0.
-            reward = reward + r_spin + r_back                
-
+        #     # add a penalty for going backwards
+        #     if action.v < 0:
+        #         r_back = -2 * abs(action.v)
+        #     else:
+        #         r_back = 0.
+        #     reward = reward + r_spin + r_back                
         return reward, done, episode_info
 
 

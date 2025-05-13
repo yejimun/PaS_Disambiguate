@@ -115,7 +115,7 @@ def evaluate(rollouts, config, model_dir, actor_critic,eval_envs, device, test_s
             if not done:
                 global_time = baseEnv.global_time
                 
-            if visualize and k<20:
+            if visualize and k<5:
                 if config.robot.policy == 'pas_rnn':
                     if config.pas.encoder_type == 'vae' and config.pas.gridsensor == 'sensor':
                         all_videoGrids.append(decoded.squeeze(0).squeeze(1).cpu().numpy())
@@ -164,15 +164,25 @@ def evaluate(rollouts, config, model_dir, actor_critic,eval_envs, device, test_s
                 if 'episode' in info.keys():
                     eval_episode_rewards.append(info['episode']['r'])                    
             
-            if done and visualize and k<16:        
+            if done and visualize and k<5:        
                 video_dir = model_dir+"/"+phase+"_render/"
                 if not os.path.exists(video_dir):
                     os.makedirs(video_dir) 
                     
                 output_file=video_dir+str(j)+'_'+'eval_epi'+str(k)+'_'+str(infos[0]['info'])
-                print(stepCounter)
+                
+                if config.robot.policy == 'pas_rnn':
+                    if config.pas.encoder_type == 'vae' and config.pas.gridsensor == 'sensor':
+                        all_videoGrids.append(decoded.squeeze(0).squeeze(1).cpu().numpy())
+                    else:
+                        all_videoGrids.append(obs['grid'][:,-1].cpu().numpy())                    
+                        
+                else:
+                    all_videoGrids = torch.Tensor([99.])
                 
                 if phase == 'val':
+                    # print(len(all_videoGrids))
+                    # pdb.set_trace()
                     eval_envs.render(mode='video', all_videoGrids=all_videoGrids, output_file=output_file) 
                 else:
                     eval_envs.render(mode='video', all_videoGrids=all_videoGrids, output_file=output_file)  # mode='video'  or  mode=None for render_traj          

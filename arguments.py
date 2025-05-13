@@ -6,7 +6,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='RL')
     # the saving directory for train.py
     parser.add_argument(
-        '--output_dir', type=str, default= 'entering_room_data/train') # 'VAEdata/test' 'crossing_H6_data/test'
+        '--output_dir', type=str, default= 'data/SensorRL_enteringRoom') # 'VAEdata/test' 'crossing_H6_data/test'
     parser.add_argument(
         '--lr', type=float, default=1e-5, help='learning rate (default: 7e-4)') 
     parser.add_argument(
@@ -104,7 +104,7 @@ def get_args():
     parser.add_argument(
         '--num-env-steps',
         type=int,
-        default=20e6, # 15e6  # TODO: change back to 15e6
+        default=5e6, # 15e6  # TODO: change back to 15e6
         help='number of environment steps to train (default: 10e6)')
     parser.add_argument(
         '--use-linear-lr-decay',

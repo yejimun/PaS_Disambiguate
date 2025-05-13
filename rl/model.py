@@ -26,11 +26,14 @@ class Policy(nn.Module):
 
             if config.pas.encoder_type == 'vae':
                 if config.sim.train_val_sim == "turtlebot":
-                    vae_weight_file = 'data/Turtlebot_LabelVAE_CircleFOV30/label_vae_ckpt/label_vae_weight_60.pth'
+                    label_vae_weight_file = 'data/Turtlebot_LabelVAE_CircleFOV30/label_vae_ckpt/label_vae_weight_60.pth'
                 elif config.sim.train_val_sim == "circle_crossing":
-                    vae_weight_file = 'data/crossing_H12/label_vae_ckpt/label_weight_300.pth'
+                    label_vae_weight_file = 'data/crossing_H12/label_vae_ckpt/label_weight_300.pth'
                     sensor_vae_weight_file = 'data/crossing_H12/sensor_vae_woEstLoss_ckpt/sensor_weight_300.pth'
-                self.base.Label_VAE.load_state_dict(torch.load(vae_weight_file), strict=True)
+                elif config.sim.train_val_sim == 'entering_room':
+                    label_vae_weight_file = 'data/entering_room/label_vae_ckpt/label_weight_500.pth'
+                    sensor_vae_weight_file = 'data/entering_room/sensor_vae_ckpt/sensor_weight_500.pth'
+                self.base.Label_VAE.load_state_dict(torch.load(label_vae_weight_file), strict=True)
                 self.base.Sensor_VAE.load_state_dict(torch.load(sensor_vae_weight_file), strict=True)
         else:
             raise NotImplementedError

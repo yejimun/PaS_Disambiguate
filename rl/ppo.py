@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from vae_pretrain import KL_loss, MSE
+from vae_pretrain import KL_loss, MSE, reconstruction_loss
 
 class PPO():
     def __init__(self,
@@ -12,6 +12,7 @@ class PPO():
                  value_loss_coef,
                  entropy_coef,
                  PaS_coef = None,
+                 PaS_est_coef = None, 
                  lr=None,
                  eps=None,
                  max_grad_norm=None,
@@ -26,6 +27,7 @@ class PPO():
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
         self.PaS_coef = PaS_coef
+        self.PaS_est_coef = PaS_est_coef 
 
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
@@ -48,7 +50,9 @@ class PPO():
         value_loss_epoch = 0
         action_loss_epoch = 0
         dist_entropy_epoch = 0
+        k_loss_epoch = 0
         PaS_loss_epoch = 0
+        PaS_est_loss_epoch = 0
 
 
         for e in range(self.ppo_epoch):
@@ -86,15 +90,41 @@ class PPO():
 
                 self.optimizer.zero_grad()
                 
+                total_loss=value_loss * self.value_loss_coef + action_loss - dist_entropy * self.entropy_coef
+                
                 if self.actor_critic.config.pas.encoder_type =='vae':
-                    PaS_loss = MSE(z, z_l)
-                    k_loss = KL_loss(mu, logvar)          
-                        
-                    total_loss=value_loss * self.value_loss_coef + action_loss - dist_entropy * self.entropy_coef + PaS_loss * self.PaS_coef + k_loss * 0.00025                    
+                    k_loss = KL_loss(mu, logvar)   
+                    total_loss += k_loss * 0.5
                     
+                    ## Raise error if both PaS_coef and PaS_est_coef are not set
+                    if self.PaS_coef is [None, 0.] and self.PaS_est_coef is [None, 0.]:
+                        raise ValueError('Both PaS_coef and PaS_est_coef are not set. Please set at least one of them.')
+                    
+                    if self.PaS_coef > 0.:
+                        PaS_loss = MSE(z, z_l)
+                        total_loss += PaS_loss * self.PaS_coef
+                    else:
+                        PaS_loss = torch.tensor(0.0).cuda()
+                                                
+                    if self.PaS_est_coef >0.: 
+                        import pdb
+                        
+                        ## Estimating only occluded human agents
+                        # Remove walls
+                        target_grid = obs_batch['label_grid'][:,0].clone()
+                        target_grid[obs_batch['label_grid'][:,1]==-9999.] = 0.0
+                        # Remove seen (including partially visible) humans
+                        target_grid[obs_batch['grid'][:,-1]==1.] == 0.0              
 
+                        PaS_est_loss = reconstruction_loss(decoded.squeeze(1), target_grid)
+                        total_loss += PaS_est_loss * self.PaS_est_coef
+                    else:
+                        PaS_est_loss = torch.tensor(0.0).cuda()
                 else:
-                    total_loss=value_loss * self.value_loss_coef + action_loss - dist_entropy * self.entropy_coef
+                    k_loss = torch.tensor(0.0).cuda()
+                    PaS_loss = torch.tensor(0.0).cuda()
+                    PaS_est_loss = torch.tensor(0.0).cuda()                       
+
                 total_loss.backward()
                 
                 nn.utils.clip_grad_norm_(self.actor_critic.parameters(),
@@ -105,19 +135,22 @@ class PPO():
                 value_loss_epoch += value_loss.item()
                 action_loss_epoch += action_loss.item()
                 dist_entropy_epoch += dist_entropy.item()  
+                k_loss_epoch += k_loss.item()
+                PaS_loss_epoch += PaS_loss.item()
+                PaS_est_loss_epoch += PaS_est_loss.item()                
 
-                if self.actor_critic.config.pas.encoder_type =='vae': 
-                    PaS_loss_epoch += PaS_loss.item()    
+                # if self.actor_critic.config.pas.encoder_type =='vae' self.actor_critic.config.pas.PaS_coef > 0.: 
+                #     PaS_loss_epoch += PaS_loss.item()   
+                #     if self.PaS_est_coef >0.:     
+                #         PaS_est_loss_epoch += est_loss.item()
 
         num_updates = self.ppo_epoch * self.num_mini_batch
 
         value_loss_epoch /= num_updates
         action_loss_epoch /= num_updates
         dist_entropy_epoch /= num_updates
+        k_loss_epoch /= num_updates
+        PaS_loss_epoch /= num_updates
+        PaS_est_loss_epoch /= num_updates
 
-        if self.actor_critic.config.pas.encoder_type =='vae' : 
-            PaS_loss_epoch /= num_updates
-            return value_loss_epoch, action_loss_epoch, dist_entropy_epoch, PaS_loss_epoch
-
-        else:   
-            return value_loss_epoch, action_loss_epoch, dist_entropy_epoch
+        return value_loss_epoch, action_loss_epoch, dist_entropy_epoch, k_loss_epoch, PaS_loss_epoch, PaS_est_loss_epoch

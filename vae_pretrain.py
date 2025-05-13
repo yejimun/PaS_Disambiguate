@@ -20,11 +20,10 @@ from crowd_sim.envs.grid_utils import MapSimilarityMetric
 import pdb
 
 # TODO:
-# 1. (Optional) Train Sensor VAE for estimating only the unknown area
+# 1. Ablation study between PaS only and PaS_est only
+# 2. Ablation study betweeen MSE loss and BCE loss
 
 
-# 5/5 TODO
-# Remove walls during data processing
 
 
 def make_sequence(data_path, phase, sequence=1):    
@@ -153,12 +152,12 @@ def to_cuda(label_grid, sensor_grid, id_grid=None):
         return label_grid.to(device), sensor_grid.to(device), id_grid
 
 
-def reconstruction_loss(x, x_recon):
+def reconstruction_loss(x, target):
     """[summary]
 
     Args:
-        x ([N,1,120,120]): [description]
-        x_recon ([N,1,120,120]): [description]
+        x ([N,H,W]): [description]
+        x_recon ([N,H,W]): [description]
         distribution (str, optional): [description]. Defaults to 'gaussian'.
         overest (bool, optional): [description]. Defaults to False.
 
@@ -166,15 +165,25 @@ def reconstruction_loss(x, x_recon):
         [type]: [description]
     """
     batch_size = x.size(0)
+    H = x.size(-2)
+    W = x.size(-1)
     assert batch_size != 0
-
-    recon_loss = F.mse_loss(x_recon, x, size_average=False).div(batch_size) 
+    x = x.view(batch_size, H, W)
+    target = target.view(batch_size, H, W)
+    
+    recon_loss = F.mse_loss(x,target, reduction='none').sum(dim=(1,2)).mean()
     return recon_loss
 
 
 def MSE(x, target):
+    """[summary]
+    x: (N, 1, len)
+    target: (N, 1, len)
+    """
     batch_size = x.size(0)
-    return F.mse_loss(x, target, reduction='mean').div(batch_size)
+    x = x.view(batch_size, -1)
+    target = target.view(batch_size, -1)
+    return F.mse_loss(x, target, reduction='none').sum(dim=1).mean()
 
 def average(input_list):
     if input_list:
@@ -183,12 +192,19 @@ def average(input_list):
         return 0
 
 def KL_loss(mu, logvar):
+    """
+    mu: (N, 128)
+    logvar: (N, 128)
+    """
+    batch_size = mu.size(0)
+    mu = mu.view(batch_size, -1)
+    logvar = logvar.view(batch_size, -1)
     KLD = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0) 
     return KLD
 
 
-def VAE_loss(x, recon_x, mu, logvar):
-    MSE = reconstruction_loss(x, recon_x)
+def VAE_loss(x, target, mu, logvar):
+    MSE = reconstruction_loss(x, target)
     KLD = KL_loss(mu, logvar)
     return MSE, KLD
 
@@ -214,8 +230,8 @@ def Label_vae_evaluate(beta, logging, loader, model, epoch=None):
             target_grid = label_grid.clone()
             target_grid[id_grid==-9999.] = 0.0           
             
-            # recon_loss, k_loss = VAE_loss(label_grid, decoded_l, mu_l, logvar_l)
-            recon_loss, k_loss = VAE_loss(target_grid, decoded_l, mu_l, logvar_l)
+            # recon_loss, k_loss = VAE_loss(decoded_l, label_grid, mu_l, logvar_l)
+            recon_loss, k_loss = VAE_loss(decoded_l, target_grid, mu_l, logvar_l)
             loss = recon_loss + k_loss * beta
 
 
@@ -316,8 +332,8 @@ def Label_vae_train(beta, logging, train_loader, validation_loader, model, ckpt_
             target_grid = label_grid.clone()
             target_grid[id_grid==-9999.] = 0.0     
             
-            # recon_loss, k_loss = VAE_loss(label_grid, decoded_l, mu_l, logvar_l)
-            recon_loss, k_loss = VAE_loss(target_grid, decoded_l, mu_l, logvar_l)
+            # recon_loss, k_loss = VAE_loss(decoded_l, label_grid, mu_l, logvar_l)
+            recon_loss, k_loss = VAE_loss(decoded_l, target_grid, mu_l, logvar_l)
             loss = recon_loss + k_loss * beta
         
 
@@ -389,25 +405,29 @@ def Sensor_vae_evaluate(beta, logging, loader, gt_model, model, epoch=None, PaS_
             mu, logvar, z = model(sensor_grid)  
             _, _, z_l, _ = gt_model(label_grid)
             decoded = gt_model.decoder(z) # Needed for visualization even if not used for training.
-            PaS_loss = MSE(z, z_l)     
-            if est_coef>0:
-                ## Estimating only occluded human agents
-                # Remove walls
-                target_grid = label_grid[:,-1].clone()
-                target_grid[id_grid[:,-1]==-9999.] = 0.0
-                # Remove seen (including partially visible) humans
-                target_grid[sensor_grid[:,-1]==1.] == 0.0              
     
-                # est_loss, k_loss = VAE_loss(label_grid[:,-1].squeeze(1), decoded.squeeze(1), mu, logvar)
-                est_loss, k_loss = VAE_loss(target_grid.squeeze(1), decoded.squeeze(1), mu, logvar)
-                loss = est_coef * est_loss + k_loss * beta   +  PaS_coef * PaS_loss
+            ## Estimating only occluded human agents
+            # Remove walls
+            target_grid = label_grid[:,-1].clone()
+            target_grid[id_grid[:,-1]==-9999.] = 0.0
+            # Remove seen (including partially visible) humans. Collected data considers partially visible humans as fully visible
+            target_grid[sensor_grid[:,-1]==1.] == 0.0     
+            
+            loss = KL_loss(mu, logvar)
+            if est_coef>0:   
+                # est_loss, k_loss = VAE_loss(decoded.squeeze(1),, label_grid[:,-1].squeeze(1), mu, logvar)
+                est_loss = reconstruction_loss(decoded.squeeze(1), target_grid.squeeze(1))
+                loss += est_coef * est_loss
             else:
                 est_loss = torch.zeros(1).cuda()
-                k_loss = KL_loss(mu, logvar)
-                loss = k_loss * beta   +  PaS_coef * PaS_loss            
             
-
-            y_label = label_grid[:,-1].squeeze(1).float()
+            if PaS_coef>0:
+                PaS_loss = MSE(z, z_l)     
+                loss +=  PaS_coef * PaS_loss  
+            else:
+                PaS_loss = torch.zeros(1).cuda()
+                
+            y_label = target_grid.squeeze(1).float()
             y_pred = decoded.squeeze(1)
             y_pred[y_pred>=0.6] = 1.0
             y_pred[y_pred<=0.4] = 0.0
@@ -484,12 +504,12 @@ def Sensor_vae_evaluate(beta, logging, loader, gt_model, model, epoch=None, PaS_
         #     avg_similarity = average(total_similarity)
         #     avg_base_similarity = average(total_base_similarity)        
             
-            if est_coef>0:
+            if PaS_coef>0:
                 loss = logging.info('(Test) total_loss: {:.4f}, PaS_loss: {:.4f}, est_loss: {:.4f}, accuracy: {:.4f}, precision: {:.4f}, recall: {:.4f}, precision(unoccupied): {:.4f}, recall(unoccupied): {:.4f}'.
                 format(avg_total_loss, avg_PaS_loss, avg_est_loss, avg_accuracy, avg_precision, avg_recall, avg_precision_unoccupied, avg_recall_unoccupied))     
             else:
-                loss = logging.info('(Test) total_loss: {:.4f}, PaS_loss: {:.4f}, accuracy: {:.4f}, precision: {:.4f}, recall: {:.4f}, precision(unoccupied): {:.4f}, recall(unoccupied): {:.4f}'.
-                format(avg_total_loss, avg_PaS_loss, avg_accuracy, avg_precision, avg_recall, avg_precision_unoccupied, avg_recall_unoccupied))   
+                loss = logging.info('(Test) total_loss: {:.4f}, est_loss: {:.4f}, accuracy: {:.4f}, precision: {:.4f}, recall: {:.4f}, precision(unoccupied): {:.4f}, recall(unoccupied): {:.4f}'.
+                format(avg_total_loss, avg_est_loss, avg_accuracy, avg_precision, avg_recall, avg_precision_unoccupied, avg_recall_unoccupied))   
         #     logging.info('(Test) similarity: {:.2f}, base_similarity: {:.2f}'. format(avg_similarity, avg_base_similarity))    
         #     logging.info(
         # ' occupied image similarity(pas/sensor): {:.3f}/{:.3f} and free image similarity(pas/sensor): {:.3f}/{:.3f} and occluded image similarity(pas/sensor): {:.3f}/{:.3f} '.
@@ -579,6 +599,10 @@ def Sensor_vae_evaluate(beta, logging, loader, gt_model, model, epoch=None, PaS_
 
 
 def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, model, ckpt_path, num_epochs, learning_rate = 0.001, PaS_coef=1, est_coef=1):
+    ## Raise error if both PaS_coef and est_coef are not set
+    if PaS_coef is [None, 0.] and est_coef is [None, 0.]:
+        raise ValueError('Both PaS_coef and est_coef are not set. Please set at least one of them.')
+    
     if gt_model is not None:
         for param in gt_model.parameters():
             param.requires_grad = False
@@ -609,7 +633,8 @@ def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, m
             with torch.no_grad():
                 _, _, z_l, _ = gt_model(label_grid)
             
-            PaS_loss = MSE(z_l, z)     
+            
+            loss = KL_loss(mu, logvar)
             if est_coef>0:
                 decoded = gt_model.decoder(z)
                 
@@ -620,15 +645,19 @@ def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, m
                 # Remove seen (including partially visible) humans
                 target_grid[sensor_grid[:,-1]==1.] == 0.0              
                 
-                # est_loss, k_loss = VAE_loss(label_grid[:,-1].squeeze(1), decoded.squeeze(1), mu, logvar)
-                est_loss, k_loss = VAE_loss(target_grid.squeeze(1), decoded.squeeze(1), mu, logvar)
-                loss = est_coef * est_loss + k_loss * beta   +  PaS_coef * PaS_loss
+                # est_loss, k_loss = VAE_loss(decoded.squeeze(1), label_grid[:,-1].squeeze(1), mu, logvar)
+                est_loss = reconstruction_loss(decoded.squeeze(1), target_grid.squeeze(1))
+                loss += est_coef * est_loss 
             else:
+                est_loss = torch.zeros(1).cuda()
+                
+            if PaS_coef>0:
+                PaS_loss = MSE(z, z_l)    
                 with torch.no_grad():
                     decoded = gt_model.decoder(z)
-                est_loss = torch.zeros(1).cuda()
-                k_loss = KL_loss(mu, logvar)
-                loss = k_loss * beta   +  PaS_coef * PaS_loss          
+                loss +=  PaS_coef * PaS_loss          
+            else:
+                PaS_loss = torch.zeros(1).cuda()
                 
 
             PaS_optimizer.zero_grad()
@@ -646,7 +675,7 @@ def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, m
         avg_est_loss = average(est_loss_epoch)
         avg_total_loss = average(total_loss_epoch)
         
-        if est_coef > 0:            
+        if est_coef > 0:     
             logging.info('(Epoch {:d}) total_loss: {:.4f}, PaS_loss: {:.4f}, est_loss: {:.4f}'.
                         format(epoch, avg_total_loss, avg_PaS_loss, avg_est_loss))   
             writer.add_scalar('Sensor_VAE_train_est_loss', avg_est_loss, epoch)
@@ -672,8 +701,8 @@ def Sensor_vae_train(beta, logging, train_loader, validation_loader, gt_model, m
 if __name__ == "__main__":
 
     device = ("cuda" if torch.cuda.is_available() else "cpu")
-    num_epochs = 100 # 300 # 60 for the turtlebot experiment
-    beta = 0.00025
+    num_epochs = 500 # 60 for the turtlebot experiment
+    beta = 0.5
 
     algo_args = get_args()
     config = Config()
@@ -686,7 +715,7 @@ if __name__ == "__main__":
     sequence = config.pas.sequence 
     
     max_grad_norm = algo_args.max_grad_norm
-    batch_size = 16    
+    batch_size = 32    
     grid_shape = [100, 100] 
          
     
@@ -701,7 +730,7 @@ if __name__ == "__main__":
     out_dir = 'data/'+ output_path  
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
-    log_file = os.path.join(out_dir, 'label_vae_woEstLoss.log')
+    log_file = os.path.join(out_dir, 'label_vae.log')
     mode = 'a'
     file_handler = logging.FileHandler(log_file, mode=mode)
     stdout_handler = logging.StreamHandler(sys.stdout)
@@ -709,7 +738,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=level, handlers=[stdout_handler, file_handler],
                         format='%(asctime)s, %(levelname)s: %(message)s', datefmt="%Y-%m-%d %%M:%S")
 
-    summary_path = out_dir+'/runs_sensor_vae_woEstLoss_train' 
+    summary_path = out_dir+'/runs_label_vae' 
     if not os.path.exists(summary_path):
         os.makedirs(summary_path)
     writer = SummaryWriter(summary_path) 
@@ -739,26 +768,39 @@ if __name__ == "__main__":
     # label_vae.load_state_dict(torch.load(label_vae_ckpt_file))
 
     
-    train_set = DATA(logging, 'train', sequence=1) 
-    val_set = DATA(logging, 'val', sequence=1) 
-    train_loader = DataLoader(dataset=train_set, shuffle=True, batch_size=batch_size,num_workers=1,pin_memory=True, drop_last=True)
-    validation_loader = DataLoader(dataset=val_set, shuffle=True, batch_size=batch_size,num_workers=1, pin_memory=True, drop_last=True)
+    # train_set = DATA(logging, 'train', sequence=1) 
+    # val_set = DATA(logging, 'val', sequence=1) 
+    # train_loader = DataLoader(dataset=train_set, shuffle=True, batch_size=batch_size,num_workers=1,pin_memory=True, drop_last=True)
+    # validation_loader = DataLoader(dataset=val_set, shuffle=True, batch_size=batch_size,num_workers=1, pin_memory=True, drop_last=True)
 
-    Label_vae_train(beta, logging, train_loader, validation_loader, label_vae, label_vae_ckpt_path, num_epochs, label_vae_learning_rate)
+    # Label_vae_train(beta, logging, train_loader, validation_loader, label_vae, label_vae_ckpt_path, num_epochs, label_vae_learning_rate)
 
 
-    test_set = DATA(logging,'test', sequence=1)
-    test_loader = DataLoader(dataset=test_set, shuffle=True, batch_size=batch_size,num_workers=1, pin_memory=True, drop_last=True)  # batch_size=100
+    # test_set = DATA(logging,'test', sequence=1)
+    # test_loader = DataLoader(dataset=test_set, shuffle=True, batch_size=batch_size,num_workers=1, pin_memory=True, drop_last=True)  # batch_size=100
      
-    Label_vae_evaluate(beta, logging, test_loader, label_vae)
+    # Label_vae_evaluate(beta, logging, test_loader, label_vae)
 
     ####################################
     # Sensor_VAE training
     
-    # label_vae_ckpt_file = os.path.join(label_vae_ckpt_path, 'label_weight_'+str(300)+'.pth')
-    # label_vae.load_state_dict(torch.load(label_vae_ckpt_file))
+    log_file = os.path.join(out_dir, 'sensosr_vae.log')
+    mode = 'a'
+    file_handler = logging.FileHandler(log_file, mode=mode)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    level = logging.INFO
+    logging.basicConfig(level=level, handlers=[stdout_handler, file_handler],
+                        format='%(asctime)s, %(levelname)s: %(message)s', datefmt="%Y-%m-%d %%M:%S")
+
+    summary_path = out_dir+'/runs_sensor_vae' 
+    if not os.path.exists(summary_path):
+        os.makedirs(summary_path)
+    writer = SummaryWriter(summary_path) 
     
-    sensor_vae_ckpt_path = out_dir+'/sensor_vae_woEstLoss_ckpt/'  
+    label_vae_ckpt_file = os.path.join(label_vae_ckpt_path, 'label_weight_'+str(num_epochs)+'.pth')
+    label_vae.load_state_dict(torch.load(label_vae_ckpt_file))
+    
+    sensor_vae_ckpt_path = out_dir+'/sensor_vae_ckpt/'  
     if not os.path.exists(sensor_vae_ckpt_path):
         os.makedirs(sensor_vae_ckpt_path)
     logging.info('(Loss coefficients) m: {:.6f}, est: {:.6f}'. format(PaS_coef, est_coef))    
@@ -776,7 +818,7 @@ if __name__ == "__main__":
     Sensor_vae_train(beta, logging, train_loader, validation_loader, label_vae, sensor_vae, sensor_vae_ckpt_path, num_epochs, sensor_vae_learning_rate, PaS_coef=PaS_coef, est_coef=est_coef)
 
     # # Load sensor vae model
-    # label_vae_ckpt_file = os.path.join(label_vae_ckpt_path, 'label_weight_'+str(300)+'.pth')
+    # label_vae_ckpt_file = os.path.join(label_vae_ckpt_path, 'label_weight_'+str(num_epochs)+'.pth')
     # label_vae.load_state_dict(torch.load(label_vae_ckpt_file))
     # if encoder_type == 'vae':
     #     sensor_vae = Sensor_VAE(algo_args, config)        

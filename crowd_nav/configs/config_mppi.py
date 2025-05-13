@@ -7,32 +7,32 @@ class BaseConfig(object):
 class Config(object):
     env = BaseConfig()
     env.time_limit = 50 
-    env.time_step = 0.25
+    env.time_step = 0.25 #0.25
     env.val_size = 100
     env.test_size = 500  # TODO: change back to 500
     env.randomize_attributes = False # False for turtlebot experiment
 
     reward = BaseConfig()
-    reward.success_reward = -10 
-    reward.collision_penalty = 10
+    reward.success_reward = -5 
+    reward.collision_penalty = 100
     reward.timeout_penalty = None 
-    reward.discomfort_dist = 0.2
-    reward.discomfort_penalty_factor = 10 
-    reward.disambig_reward_flag = True # 'True' or 'False'
+    reward.discomfort_dist = 0.5 # 1.0 # 0.3
+    reward.discomfort_penalty_factor = 10 #0.3 #4 # 2 #10 
+    reward.disambig_reward_flag = False #True # 'True' or 'False'
     reward.disambig_method = 'entropy' # 'linear' or 'entropy'
-    reward.disambig_factor = 2.0
+    reward.disambig_factor = 20 # 0.3 #0.1 #0.003 # 10.#0.01 # 0.003
 
     sim = BaseConfig()
-    sim.collectingdata = False #False # or True  
-    sim.train_val_sim ="circle_crossing" #"circle_crossing"  # 'static_obstacles'
-    sim.test_sim = "circle_crossing" #"circle_crossing"  # 'static_obstacles'
+    sim.collectingdata = True #False #False # or True  
+    sim.train_val_sim = "entering_room" # "entering_room" # "static_human_behindWall" #"entering_room" #'static_obstacles' # "circle_crossing"
+    sim.test_sim = "entering_room" # "entering_room" # "static_human_behindWall" #"entering_room" #'static_obstacles' # "circle_crossing" 
     sim.square_width = 10
-    sim.circle_radius = 4
-    sim.human_num = 6 # 12  # 6 # 4 for turtlebot experiment
+    sim.circle_radius = 5.
+    sim.human_num = 2 # 12 #6 # 12  # 6 # 4 for turtlebot experiment
 
     humans = BaseConfig()
     humans.visible = True
-    humans.policy =  "orca" #"social_force" # "orca"
+    humans.policy = "orca" #"social_force" # "orca"
     humans.radius = 0.3 #0.5 #0.3  # TODO: change back to 0.3
     humans.v_pref = 2. # 0.5 for the turtlebot experiment
     humans.sensor = "coordinates"
@@ -60,14 +60,15 @@ class Config(object):
     robot = BaseConfig()
     robot.visible = False 
     # srnn for now
-    robot.policy = 'pas_mppi' #'pas_diffstack' #'pas_rnn'  #'orca' 
+    robot.policy = 'pas_mppi' #'pas_mppi' #'pas_diffstack' #'pas_rnn'  #'orca' 
     robot.radius = 0.3
-    robot.v_pref = 2 #2 # 0.5 for the turtlebot experiment
+    robot.w_max = 0.5 # for unicycle. robot.w_max*PI
+    robot.v_pref = 2. #2 # 0.5 for the turtlebot experiment
     robot.sensor = "coordinates"
     # FOV = this values * PI
     robot.FOV = 2. # radius of the FOV
-    robot.disambig_angle = 0.5
-    robot.FOV_radius = 3.0
+    robot.FOV_radius = 2. #3.5 #2.5
+    robot.disambig_angle = 1 #0.6
     robot.limited_path = False  
     robot.onedim_action = False 
     robot.loop = 1
@@ -80,12 +81,12 @@ class Config(object):
 
     action_space = BaseConfig()
     # holonomic or unicycle
-    action_space.kinematics = "holonomic" #"holonomic"  # unicycle for the turtlebot experiment
+    action_space.kinematics = "unicycle" #"unicycle" #"holonomic"  # unicycle for the turtlebot experiment
 
     # config for ORCA
     orca = BaseConfig()
-    orca.neighbor_dist = 10
-    orca.safety_space = 0.15 # 0.25 for the turtlebot experiment
+    orca.neighbor_dist = 2 #10
+    orca.safety_space = 0.6 # 0.25 for the turtlebot experiment
     orca.time_horizon = 5
     orca.time_horizon_obst = 5
 
@@ -100,18 +101,19 @@ class Config(object):
     pas.grid_res = 0.1
     pas.grid_width = 100
     pas.grid_height = 100
-    pas.gridsensor = 'sensor' #'sensor' or 'gt' 
+    pas.gridsensor = 'sensor' #'sensor' #'sensor' or 'gt' 
     pas.gridtype = 'local' 
     pas.sequence = 4 # number of FOV grids stacked for Sensor AE lstm, past + present
     pas.encoder_type = 'vae'  #'vae' or 'cnn'
-    pas.PaS_coef = 0. 
+    pas.PaS_coef = 1. 
+    pas.est_coef = 0.
     pas.seq_flag = True
     
     # config for diffstack
     diffstack = BaseConfig()
-    diffstack.lookahead_steps = 4
+    diffstack.lookahead_steps = 2
     
     # mppi
-    diffstack.lambda_ = 1.
-    diffstack.num_samples = 100
+    diffstack.lambda_ = 0.1
+    diffstack.num_samples = 100 #10 #50
 

@@ -476,7 +476,6 @@ class PASRNN(nn.Module):
             masks ([type]): [description] (seq_len*nenv, 1) or  (seq_len*nenv,seq_length)             
             infer (bool, optional): [description]. Defaults to False.
         """
-
         vector = inputs['vector'] 
         grid = inputs['grid'] 
         

@@ -9,7 +9,7 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 from functorch import vmap
 from matplotlib import pyplot as plt
 from arm_pytorch_utilities import handle_batch_input
-from mppi.utils import * # compute_disambig_cost
+from mppi.utils import * # compute_disambig_entropy
 from copy import deepcopy
 import glob
 import pdb
@@ -815,7 +815,7 @@ class MPPI_Planner():
                 map_xy = self.curr_map_xy.unsqueeze(0).repeat(next_r_state.shape[1],1,1,1)
                 map_xy = [map_xy[:,0], map_xy[:,1]]
                 sensor_grid = self.curr_sensor_grid.repeat(next_r_state.shape[1],1,1)
-                self.H_cur, self.disambig_R_map, self.disambig_W_map = compute_disambig_cost(r_state.squeeze(0), self.curr_map_xy, sensor_grid, sensor_grid, decoded_in_unknown, self.r_goal, self.config)
+                self.H_cur, self.disambig_R_map, self.disambig_W_map = compute_disambig_entropy(r_state.squeeze(0), self.curr_map_xy, sensor_grid, sensor_grid, decoded_in_unknown, self.r_goal, self.config)
             else:
                 sensor_grid = self.curr_sensor_grid.unsqueeze(0).repeat(next_r_state.shape[1],1,1)
             # next_empty_grid = torch.zeros_like(self.curr_sensor_grid)
@@ -838,7 +838,7 @@ class MPPI_Planner():
             next_label_grid, _, _ = generateLabelGrid_mppi(self.curr_map_xy, next_human_pos, h_radius.squeeze(0), human_id, next_robot_pos, wall_polygons, res=grid_res)
             # next_map_xy = [next_x_local.to(next_label_grid.dtype), next_y_local.to(next_label_grid.dtype)]
             next_sensor_grid = generateSensorGrid_mppi(next_label_grid, next_human_pos, h_radius.squeeze(0), next_robot_pos, self.curr_map_xy, FOV_radius, wall_polygons, res=grid_res)
-            H_next, disambig_R_map_next, disambig_W_map_next = compute_disambig_cost(next_r_state.squeeze(0), self.curr_map_xy, sensor_grid, next_sensor_grid.clone(), decoded_in_unknown, self.r_goal, self.config)
+            H_next, disambig_R_map_next, disambig_W_map_next = compute_disambig_entropy(next_r_state.squeeze(0), self.curr_map_xy, sensor_grid, next_sensor_grid.clone(), decoded_in_unknown, self.r_goal, self.config)
             # If next entropy is reduced big (H_cur-H_next), then lower the cost. If not, increase the cost.
             ## Clip the disambig_c to be positive
             disambig_c = (H_next-self.H_cur) * self.config.reward.disambig_factor  # -(-H_next+H_cur) # torch.clamp(H_next-H_cur,min=0.0) 
@@ -848,6 +848,7 @@ class MPPI_Planner():
             
             # make the disambig_c flag based regardless of the number of grid cells
             # disambig_c = torch.where(disambig_c<0, -self.config.reward.disambig_factor, torch.tensor(0.0)).squeeze(0)       
+            # TODO: remove disambig_factor here as it is already multiplied in the disambig_c
             disambig_c = torch.where(disambig_c<0, self.config.reward.disambig_factor*disambig_c, torch.tensor(0.0)).squeeze(0)    
             
             
@@ -930,6 +931,7 @@ class MPPI_Planner():
                 
                 ## PaS high speed penalty
                 ### Slow down the robot when there's potential occluded obstacle. This keeps the robot goes straight, instead of taking detour. like PaS_collision_cost
+                # TODO: update the cost name to PaS_discomfort_c
                 PaS_collision_c = torch.where(closest_dist_PaS<self.config.reward.discomfort_dist*4, # For PaS, make "potential collision" distance is larger due to uncertainty.
                                             (next_state[...,3])**2*PaS_occupied_prob.max()*0.3,
                                             torch.tensor(0.0))   

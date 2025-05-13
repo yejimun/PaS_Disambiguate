@@ -22,6 +22,11 @@ import pdb
 import warnings
 warnings.filterwarnings("ignore")
 
+
+# TODO 5/8/2025:
+# remove disambig_factor here as it is already multiplied in the disambig_c in mppi.py
+# update the cost name to PaS_discomfort_c
+
 def main():
 
 	from arguments import get_args
@@ -124,6 +129,7 @@ def main():
 		algo_args.value_loss_coef,
 		algo_args.entropy_coef,
 		PaS_coef = config.pas.PaS_coef,
+		PaS_est_coef = config.pas.est_coef,
 		lr=algo_args.lr,
 		eps=algo_args.eps,
 		max_grad_norm=algo_args.max_grad_norm)
@@ -159,7 +165,6 @@ def main():
 		for step in range(algo_args.num_steps):
 			with torch.no_grad():
 				masks = rollouts.masks[step]
-
 				value, action, action_log_prob, recurrent_hidden_states, decoded = actor_critic.act(
 					obs, recurrent_hidden_states,
 					masks)		
@@ -199,13 +204,8 @@ def main():
 								 algo_args.gae_lambda)
 
 		
-		if config.robot.policy=='pas_rnn' and config.pas.encoder_type !='cnn':
-			value_loss, action_loss, dist_entropy, PaS_loss = agent.update(rollouts)
 
-
-		else:
-			value_loss, action_loss, dist_entropy = agent.update(rollouts)
-   
+		value_loss, action_loss, dist_entropy, k_loss, PaS_loss, PaS_est_loss = agent.update(rollouts)
 
 		rollouts.after_update()
   
@@ -222,7 +222,7 @@ def main():
 
 			## Validation for the saving intervals
 			total_num_steps = (j + 1) * algo_args.num_processes * algo_args.num_steps
-			visualize=False
+			visualize=True
 			val_episode_rewards, success_rate = evaluate(eval_rollouts, config, algo_args.output_dir, actor_critic, val_envs, device, config.env.val_size, logging, visualize, 'val', j)
 
 
@@ -240,26 +240,21 @@ def main():
 			end = time.time()
 			logging.info(
 				"Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward "
-				"{:.1f}/{:.1f}, min/max reward {:.1f}/{:.1f}, \n"
+				"{:.1f}/{:.1f}, min/max reward {:.1f}/{:.1f}, "
 					.format(j, total_num_steps,
 							int(total_num_steps / (end - start)),
 							len(episode_rewards), np.mean(episode_rewards),
 							np.median(episode_rewards), np.min(episode_rewards),
 							np.max(episode_rewards), dist_entropy, value_loss,
 							action_loss))
-
-			if config.robot.policy=='pas_rnn' and config.pas.encoder_type =='vae' :
-
-				df = pd.DataFrame({'misc/nupdates': [j], 'misc/total_timesteps': [total_num_steps],
-								'fps': int(total_num_steps / (end - start)), 'eprewmean': [np.mean(episode_rewards)],
-								'loss/policy_entropy': dist_entropy, 'loss/policy_loss': action_loss,
-								'loss/value_loss': value_loss, 'loss/PaS_loss': PaS_loss})
-
-			else:
-				df = pd.DataFrame({'misc/nupdates': [j], 'misc/total_timesteps': [total_num_steps],
-								'fps': int(total_num_steps / (end - start)), 'eprewmean': [np.mean(episode_rewards)],
-								'loss/policy_entropy': dist_entropy, 'loss/policy_loss': action_loss,
-								'loss/value_loss': value_loss})
+			logging.info(
+				"value_loss {:.4f}, policy_loss {:.4f}, PaS_loss {:.4f}, PaS_est_loss {:.4f}\n".format(value_loss, action_loss, PaS_loss, PaS_est_loss))
+			df = pd.DataFrame({'misc/nupdates': [j], 'misc/total_timesteps': [total_num_steps],
+						'fps': int(total_num_steps / (end - start)), 'eprewmean': [np.mean(episode_rewards)],
+						'loss/policy_entropy': dist_entropy, 'loss/policy_loss': action_loss,
+						'loss/value_loss': value_loss, 'loss/k_loss':k_loss, 'loss/PaS_loss': PaS_loss,
+						'loss/PaS_est_loss': PaS_est_loss})
+	
 
 			if os.path.exists(os.path.join(algo_args.output_dir, 'progress.csv')) and j > 20:
 				df.to_csv(os.path.join(algo_args.output_dir, 'progress.csv'), mode='a', header=False, index=False)

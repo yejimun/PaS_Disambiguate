@@ -96,6 +96,7 @@ def disambig_mask(grid_xy, robot_pos, goal, decoded_in_unknown, grid_res, disamb
     
     
     ## (2) Half plane mask towards the goal in y axis.
+    # TODO: unsqueeze grid_xy[1]?
     disambig_mask = torch.ones_like(grid_xy[1])
     disambig_mask = disambig_mask * (grid_xy[1] - robot_pos[:,1].unsqueeze(1).unsqueeze(2) > 0).to(disambig_mask.dtype) # (K, H, W)
     disambig_weight_map[~disambig_mask.bool()] = 0.
@@ -116,7 +117,7 @@ def disambig_mask(grid_xy, robot_pos, goal, decoded_in_unknown, grid_res, disamb
 
 
 
-def compute_disambig_cost(robot_pos, grid_xy, sensor_grid, next_sensor_grid, decoded_in_unknown, goal, config):
+def compute_disambig_entropy(robot_pos, grid_xy, sensor_grid, next_sensor_grid, decoded_in_unknown, goal, config):
     """
     For each cell, H(p) = -plogp -(1-p)log(1-p)
     The disambiguation cost is computed on towards the goal direction of the robot with 120 degree cone shaped mask.
